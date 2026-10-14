@@ -87,7 +87,7 @@ def data_dir() -> Path:
 
 
 # Shown to you: YYMM.minor.hotfix. The codename is for development notes only.
-VERSION = "2610.15.003"
+VERSION = "2610.15.004"
 CODENAME = "npcprices"
 
 DATA = data_dir()
@@ -141,7 +141,7 @@ _migrate_layout()
 DEFAULT_CONFIG = {
     "region": None,            # store window [l, t, w, h]; None = find it automatically
     "map_region": None,        # minimap name area; None = estimate from the store position
-    "interval_seconds": 0.15, # how often monitor/watch grabs the screen
+    "interval_seconds": 0.1,   # how often the screen is captured (OCR runs at its own pace)
     "confirm_frames": 2,       # identical reads needed before a row is logged
     "unmatched_extra_frames": 2,  # extra reads for a name not in the meowdb list first
     "close_frames": 3,         # empty frames in a row = shop closed
@@ -172,6 +172,9 @@ DEFAULT_CONFIG = {
     "icon_rate": 10,             # icon downloads per second (slows down by itself if meowdb asks)
 }
 
+FRAME_QUEUE_MAX = 150   # captured frames waiting for OCR (~15-45 s of scrolling); above
+                        # this the oldest give way, so memory stays modest
+
 
 def load_config() -> dict:
     cfg = dict(DEFAULT_CONFIG)
@@ -181,8 +184,8 @@ def load_config() -> dict:
             saved.pop("interval_seconds")  # old default was too slow for scrolling
         if saved.get("channel_count") == 18:
             saved.pop("channel_count")     # the previous default: use the new one
-        if saved.get("interval_seconds") == 0.75:
-            saved.pop("interval_seconds")  # the previous default: use the new one
+        if saved.get("interval_seconds") in (0.75, 0.15):
+            saved.pop("interval_seconds")  # previous defaults: use the new one
         if "outlier_min_n" in saved:       # renamed: it now applies to DEAL / HIGH too
             saved.setdefault("min_sightings", saved["outlier_min_n"])
             saved.pop("outlier_min_n")
@@ -5854,10 +5857,15 @@ class Monitor:
     Continuously OCRs the store window and turns a stream of scrolled frames into
     one clean set of listings per shop visit.
 
+    Capture and OCR are decoupled (see `run`): the screen is captured at a steady
+    rate into a queue, like a recording, and OCR works through the queue at its
+    own pace. Scrolling faster than the OCR doesn't lose rows; they're read a
+    few seconds later.
+
     - A visit starts when listings appear and ends after `close_frames` frames
-      with no store window, or when the store header (title, avatar, seller)
-      changes, i.e. you opened a different shop. Scrolling never changes the
-      header, so it never splits a visit.
+      (spanning at least ~0.15 s each) with no store window, or when the store
+      header (title, avatar, seller) changes, i.e. you opened a different shop.
+      Scrolling never changes the header, so it never splits a visit.
     - Within a visit each (item, price, qty, sold) is logged once, however many
       frames it stays on screen; it must read identically in `confirm_frames`
       frames first, which filters one-off misreads mid-scroll.
@@ -5888,6 +5896,9 @@ class Monitor:
         self.pending_unmatched: dict[tuple, Listing] = {}   # unmatched names still being re-read
         self.last_hidden = 0
         self.empty_streak = 0
+        self.empty_first: float | None = None   # capture time of the first empty frame
+        self._now = 0.0                          # capture time of the frame in step()
+        self.abort = False   # set while stopping to throw away the queued frames
         self.last_hash = None
         self.last_keys: list[tuple] = []
         self.last_listings: list[Listing] = []
@@ -6057,9 +6068,11 @@ class Monitor:
         seller_ok = not seller or not self.seller or similar(seller, self.seller) >= 0.6
         return not (title_ok and seller_ok)
 
-    def step(self, img: Image.Image, map_img: Image.Image | None = None) -> None:
+    def step(self, img: Image.Image, map_img: Image.Image | None = None,
+             ts: float | None = None) -> None:
         if self.con is None:
             self.con = db()
+        self._now = time.monotonic() if ts is None else ts
         if map_img is not None:
             self.map_img = map_img
         if self._split:
@@ -6118,6 +6131,7 @@ class Monitor:
             return
 
         self.empty_streak = 0
+        self.empty_first = None
         if not self.session_id:
             self._start_session(img)
         elif self.header_reads < 8:
@@ -6138,7 +6152,12 @@ class Monitor:
 
     def _count_empty(self):
         self.empty_streak += 1
-        if self.session_id and self.empty_streak >= self.cfg["close_frames"]:
+        if self.empty_first is None:
+            self.empty_first = self._now
+        # frames can now be captured much faster than the old one-per-OCR pace, so
+        # closing also needs the empty frames to span the time close_frames used to
+        if self.session_id and self.empty_streak >= self.cfg["close_frames"] \
+                and self._now - self.empty_first >= 0.15 * self.cfg["close_frames"]:
             self.end_session()
 
     def regions_for(self, full: Image.Image) -> tuple[list | None, list | None]:
@@ -6175,35 +6194,95 @@ class Monitor:
         return shop_r, map_r
 
     def run(self, stop_event) -> None:
-        """Capture loop; call from a background thread. Stops when stop_event is set."""
+        """Capture loop; call from a background thread. Stops when stop_event is set.
+
+        Capture and OCR are decoupled, so scrolling faster than the OCR loses
+        nothing: a capture thread grabs the screen every `interval_seconds`
+        (cheap), crops the store window and queues it; this thread works through
+        the queue at the OCR's pace. A quick sweep through shops piles up in the
+        queue — like frames of a recording — and is read out while the screen is
+        calm again. Frames where nothing moved are queued as the same image, so
+        repeats cost no memory and skip the OCR.
+
+        On stop the queued frames are still read, so a sweep made just before
+        pressing Stop isn't lost; setting `abort` as well throws them away.
+        """
+        import queue as _queue
+        import threading
+
         try:
             self.con = db()
         except Exception as e:
             self.on_event("error", f"can't open the price database: {type(e).__name__}: {e}")
             return
         blank = Image.new("RGB", (8, 8), (0, 0, 0))
-        while not stop_event.is_set():
-            t0 = time.perf_counter()
-            try:
-                full = grab_full_screen()
-                if self.cfg.get("channel_prompt") and self.chan_watch.due():
-                    try:
-                        if self.chan_watch.feed(full):
-                            self.on_event("channel_change", None)
-                    except Exception as e:
-                        self.on_event("error", f"channel check failed: {type(e).__name__}: {e}")
-                if self.megaphones.due():
-                    self.megaphones.offer(full)
-                shop_r, map_r = self.regions_for(full)
-                if shop_r is None:
-                    self.step(blank, None)  # no store window anywhere: counts as closed
-                else:
-                    self.step(crop(full, shop_r), crop(full, map_r))
-            except Exception as e:  # keep monitoring through transient failures
-                self.on_event("error", f"{type(e).__name__}: {e}")
-            wait = self.cfg["interval_seconds"] - (time.perf_counter() - t0)
-            stop_event.wait(max(wait, 0.05))
-        self.end_session()
+        frames: _queue.Queue = _queue.Queue(maxsize=FRAME_QUEUE_MAX)
+        dropped = [0]
+
+        def capture() -> None:
+            last_h, last_imgs = None, None
+            while not stop_event.is_set():
+                t0 = time.perf_counter()
+                try:
+                    full = grab_full_screen()
+                    if self.cfg.get("channel_prompt") and self.chan_watch.due():
+                        try:
+                            if self.chan_watch.feed(full):
+                                self.on_event("channel_change", None)
+                        except Exception as e:
+                            self.on_event("error", f"channel check failed: {type(e).__name__}: {e}")
+                    if self.megaphones.due():
+                        self.megaphones.offer(full)
+                    shop_r, map_r = self.regions_for(full)
+                    if shop_r is None:
+                        imgs = (blank, None)   # no store window anywhere: counts as closed
+                    else:
+                        imgs = (crop(full, shop_r), crop(full, map_r))
+                    h = frame_hash(imgs[0])
+                    if last_h is not None and bin(h ^ last_h).count("1") <= 8 and last_imgs:
+                        imgs = last_imgs   # nothing moved: requeue the same image object
+                    else:
+                        last_h, last_imgs = h, imgs
+                    item = (imgs[0], imgs[1], time.monotonic())
+                    while True:
+                        try:
+                            frames.put_nowait(item)
+                            break
+                        except _queue.Full:   # OCR far behind: the oldest frame gives way
+                            try:
+                                frames.get_nowait()
+                                dropped[0] += 1
+                            except _queue.Empty:
+                                pass
+                except Exception as e:
+                    self.on_event("error", f"{type(e).__name__}: {e}")
+                wait = self.cfg["interval_seconds"] - (time.perf_counter() - t0)
+                stop_event.wait(max(wait, 0.02))
+
+        grabber = threading.Thread(target=capture, daemon=True, name="mfm-capture")
+        grabber.start()
+        last_backlog = 0
+        try:
+            while True:
+                try:
+                    img, map_img, ts = frames.get(timeout=0.2)
+                except _queue.Empty:
+                    if stop_event.is_set():
+                        break    # every captured frame was read: done
+                    continue
+                if stop_event.is_set() and self.abort:
+                    break        # don't read what's left in the queue
+                try:
+                    self.step(img, map_img, ts)
+                except Exception as e:  # keep monitoring through transient failures
+                    self.on_event("error", f"{type(e).__name__}: {e}")
+                n = frames.qsize()
+                if (n == 0) != (last_backlog == 0) or abs(n - last_backlog) >= 5:
+                    last_backlog = n   # how far the OCR is behind the screen, for the GUI
+                    self.on_event("backlog", {"frames": n, "dropped": dropped[0]})
+        finally:
+            self.end_session()
+            self.on_event("stopped", {"dropped": dropped[0]})
 
 
 def watch(channel, cfg) -> None:
@@ -6222,7 +6301,8 @@ def watch(channel, cfg) -> None:
         elif kind == "error":
             print(f"[error] {p}")
 
-    print(f"Monitoring every {cfg['interval_seconds']}s. Open shops and scroll; Ctrl+C to stop.")
+    print(f"Capturing every {cfg['interval_seconds']}s; the OCR follows at its own pace.\n"
+          f"Open shops and scroll; Ctrl+C to stop.")
     stop = threading.Event()
     try:
         Monitor(cfg, on_event, channel).run(stop)

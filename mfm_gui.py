@@ -625,6 +625,8 @@ class App:
         self.ignored = set(mfm.load_ignorelist())
         self.shops_today = 0
         self.logged_today = 0
+        self.backlog = 0        # captured frames waiting for OCR (0 = reading live)
+        self._behind = False    # "the OCR is behind" is showing in the status bar
         self.chan_watch = mfm.ChannelWatch()   # change-channel dialog: seen, then gone
         self.chan_popup = None
 
@@ -812,6 +814,7 @@ class App:
                 "Screen Recording, then quit and reopen the app.")
             return
         self.stop_event = threading.Event()
+        self.backlog, self._behind = 0, False
         self.monitor = mfm.Monitor(self.cfg, lambda k, p: self.events.put((k, p)),
                                    self.channel())
         self.monitor.chan_watch = self.chan_watch
@@ -822,10 +825,18 @@ class App:
         self._mega_status_text(None)
 
     def stop(self):
+        aborting = False
         if self.stop_event:
+            if self.stop_event.is_set() and self.monitor:
+                self.monitor.abort = True   # pressed again while finishing: drop the queue
+                aborting = True
             self.stop_event.set()
         self.start_btn.config(text="▶  Start monitoring")
-        self._set_status("Stopped.")
+        if not aborting and self.worker and self.worker.is_alive() and self.backlog:
+            self._set_status(f"Stopped — still reading {self.backlog} captured frames "
+                             "(press Stop again to discard them).")
+        else:
+            self._set_status("Stopped.")
         self.root.after(300, lambda: self._mega_status_text(None))
 
     def channel(self) -> str | None:
@@ -1188,6 +1199,28 @@ class App:
         self.found_at = layout
         self._update_stats(None, None)
 
+    def on_backlog(self, p):
+        """How far the OCR is behind the captures. Scrolling faster than the OCR
+        queues frames instead of losing rows; they're read moments later."""
+        self.backlog = p["frames"]
+        if self.stop_event is not None and self.stop_event.is_set():
+            if self.backlog and not (self.monitor and self.monitor.abort):
+                self._set_status(f"Stopped — still reading {self.backlog} captured frames "
+                                 "(press Stop again to discard them).")
+        elif self.backlog >= 10:
+            self._behind = True
+            self._set_status(f"Monitoring — reading is {self.backlog} frames behind the "
+                             "screen; nothing is lost, results show in a moment.")
+        elif self._behind and not self.backlog:
+            self._behind = False
+            self._set_status("Monitoring — open shops and scroll through them normally.")
+
+    def on_stopped(self, _p=None):
+        """The monitor finished, including any frames still queued when Stop was pressed."""
+        self.backlog = 0
+        if self.stop_event is not None and self.stop_event.is_set():
+            self._set_status("Stopped.")
+
     def on_error(self, msg):
         self.report_error("Monitoring error", msg)
 
@@ -1279,6 +1312,7 @@ class App:
         self.stats.config(text=(
             f"Rows read this frame:  {on_screen}\n"
             f"OCR time:  {speed}\n"
+            f"Frames waiting:  {self.backlog}\n"
             f"Shops visited:  {self.shops_today}\n"
             f"Listings logged:  {self.logged_today}\n"
             f"Shop area:  {area(region, lay.store if lay else None)}\n"
@@ -3866,7 +3900,9 @@ class App:
         tips = {
             "deal_threshold_pct": "How far below (DEAL) or above (HIGH) the market price a listing "
                                   "must be.",
-            "interval_seconds": "How often the screen is read. Higher uses less CPU.",
+            "interval_seconds": "How often the screen is captured. The OCR reads the captures "
+                                "at its own pace, so nothing is lost when you scroll fast. "
+                                "Higher uses less CPU.",
             "confirm_frames": "How many matching reads a listing needs before it's saved.",
             "unmatched_extra_frames": "Extra reads for names not in the item list, before they're "
                                       "saved.",

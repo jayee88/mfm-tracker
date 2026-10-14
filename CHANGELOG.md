@@ -1,5 +1,15 @@
 # Changelog
 
+## 2610.15.004 — 2026-10-14
+
+### Changed
+- **Scroll as fast as you like.** The screen is captured continuously — like a
+  recording — and the reading works through the captures at its own pace, so rows
+  aren't missed when you scroll or hop shops faster than the OCR can read. The
+  status bar and a new *Frames waiting* stat show when it's catching up.
+- Pressing **Stop** still reads the frames captured just before; press Stop again
+  to discard them.
+
 ## 2610.15.003 — 2026-10-14
 
 ### Changed
