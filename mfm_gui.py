@@ -124,7 +124,7 @@ def apply_fonts(root) -> str:
     root._mfm_fonts = keep
     return fam
 
-COLS = ("item", "each", "market", "diff", "verdict")
+COLS = ("item", "each", "market", "npc_sell", "diff", "verdict")
 HEAD = {"item": "Item", "each": "Price", "market": "Market",
         "diff": "Diff", "verdict": "Verdict", "shop": "Shop", "player": "Player", "map": "Map",
         "channel": "Channel", "best_shop": "Shop", "best_player": "Player", "best_map": "Map",
@@ -488,6 +488,8 @@ def make_tree(parent, cols) -> ttk.Treeview:
     # the row keeps its own background
     tree.tag_configure("watch", foreground=WATCH_FG, font="MfmBold")
     tree.tag_configure("deal", background="#d5f2dc", foreground="#145c2c")
+    # for sale under what an NPC pays for it: a darker green than a deal
+    tree.tag_configure("npc", background="#8fd3a1", foreground="#0b3d1c")
     tree.tag_configure("high", background="#fadad7", foreground="#8c1d16")
     tree.tag_configure("unknown", foreground="#8a8a8a")
     tree.tag_configure("sold", foreground="#9a9a9a", background="#f0f0f0")
@@ -566,6 +568,18 @@ def sort_tree(tree, col, reverse):
     for i, (_, k) in enumerate(rows):
         tree.move(k, "", i)
     tree.heading(col, command=lambda: sort_tree(tree, col, not reverse))
+
+
+def npc_sell_price(item: str) -> int | None:
+    """What an NPC pays for one of this item (from the item list), if known."""
+    v = (mfm.item_info(item) or {}).get("npcSell")
+    return v if isinstance(v, int) and v > 0 else None
+
+
+def below_npc(item: str, each) -> int | None:
+    """The NPC sell price, when a listing at `each` is cheaper than it."""
+    npc = npc_sell_price(item)
+    return npc if npc and each and each < npc else None
 
 
 def tag_for(v: str) -> str:
@@ -1821,10 +1835,13 @@ class App:
         self._forget_icon(s.item)  # an icon may have just been saved/upgraded
         ign = s.item in self.ignored
         found = bool(hit) or (bool(wl) and not s.sold)
+        npc = npc_sell_price(s.item)
+        under_npc = bool(npc) and not s.sold and not ign and s.each < npc
         iid = self.live.insert("", "end", image=self.icon_for(s.item, found=found),
-                         tags=(("ignored",) if ign and verdict != "SOLD" else (tag_for(verdict),))
+                         tags=(("ignored",) if ign and verdict != "SOLD" else
+                               ("npc",) if under_npc else (tag_for(verdict),))
                          + (("watch",) if found else ()), values=(
-            s.item, mfm.fmt(s.each), mfm.fmt(s.market),
+            s.item, mfm.fmt(s.each), mfm.fmt(s.market), mfm.fmt(npc) if npc else "",
             diff_text(s.pct), verdict, s.notes,
             {"seen": "already logged", "sold": "marked sold"}.get(s.status, "new")))
         if s.status == "seen":   # same shop, same price, logged in the last 24 h: not added again
@@ -1837,7 +1854,21 @@ class App:
             self.logged_today += 1
         # deals only make a sound for items on your alert list (a watched item under
         # its max price already pinged above)
-        if verdict == "DEAL" and not hit and not ign and any(w["item"] == s.item and not mfm.watch_is_word(w) for w in self.watch):
+        if under_npc and s.status != "seen":
+            # cheaper than an NPC pays for it: a ding, whatever the market says
+            self._set_status(f"{s.item} for {mfm.fmt(s.each)}: under the NPC sell price ({mfm.fmt(npc)}).")
+            if not hit:
+                self._ding()
+        elif verdict == "DEAL" and not hit and not ign and any(w["item"] == s.item and not mfm.watch_is_word(w) for w in self.watch):
+            self.root.bell()
+
+    def _ding(self):
+        """A sound only (the alert sound, at most once every 2 seconds), no window raised."""
+        import time as _t
+        if not self.cfg.get("npc_ding", True) or _t.monotonic() - getattr(self, "_last_ping", 0) <= 2:
+            return
+        self._last_ping = _t.monotonic()
+        if not (self.cfg.get("alert_sound_on", True) and mfm.play_sound(self.cfg.get("alert_sound") or None)):
             self.root.bell()
 
     def _ping(self):
@@ -1883,7 +1914,8 @@ class App:
 
     def on_closed(self, p):
         n = p["count"]
-        deals = sum(1 for k in self.live.get_children() if "deal" in self.live.item(k, "tags"))
+        deals = sum(1 for k in self.live.get_children()
+                    if {"deal", "npc"} & set(self.live.item(k, "tags")))
         label = " · ".join(x for x in (p.get("title"), p.get("seller")) if x) or p["shop"]
         self.recent.insert(0, f"{datetime.now():%H:%M}  {label}"
                               + (f" @ {p['map']}" if p["map"] else "") + f"  — {n} items"
@@ -2256,7 +2288,7 @@ class App:
                                                    self.show_ignored.get())
         rows = [r for r in scored
                 if (show_outliers or r[6] != "OUTLIER")
-                and not (only_deals and (r[6] != "DEAL" or r[0]))
+                and not (only_deals and ((r[6] != "DEAL" and not below_npc(r[2], r[4])) or r[0]))
                 and (show_ignored or r[2] not in self.ignored)]
         if self.deals_watched_only.get():
             # sold, pct, item, qty, each, mkt, v, where, ts, price, shop, seller, notes
@@ -2267,16 +2299,22 @@ class App:
         self.scopes = {k: v for k, v in self.scopes.items() if k[0] != str(self.deals)}
         tree_id = str(self.deals)
 
+        npcs: dict = {}
+
         def put(start):
             self._deals_job = None
             end = min(start + 1500, len(rows))
             for sold, pct, item, qty, each, mkt, v, where, ts, price, shop, seller, notes in rows[start:end]:
                 found = not sold and (bool(mfm.watch_match(self.watch, item, each)) or bool(
                     mfm.watched_listing_match(self.watched_listings, item, shop or "", seller or "", price)))
-                tag = "sold" if sold else ("ignored" if item in self.ignored else tag_for(v))
+                if item not in npcs:
+                    npcs[item] = npc_sell_price(item)
+                npc = npcs[item]
+                tag = "sold" if sold else ("ignored" if item in self.ignored else
+                                           "npc" if npc and each < npc else tag_for(v))
                 iid = self.deals.insert("", "end", image=self.icon_for(item, found=found),
                                         tags=(tag,) + (("watch",) if found else ()), values=(
-                    item, mfm.fmt(each), mfm.fmt(mkt),
+                    item, mfm.fmt(each), mfm.fmt(mkt), mfm.fmt(npc) if npc else "",
                     diff_text(None if pct == 999 else pct),
                     v, "sold" if sold else "for sale", notes, *where, mfm.local_time(ts)))
                 self.scopes[(tree_id, iid)] = {"price": price, "qty": qty, "shop": shop, "seller": seller,
@@ -2521,6 +2559,12 @@ class App:
         self.raise_on = tk.BooleanVar(value=self.cfg.get("alert_raise", True))
         ttk.Checkbutton(bottom, text="Bring this window to front", variable=self.raise_on,
                         command=self._save_sound_prefs).pack(side="left", padx=(10, 0))
+        self.npc_ding_on = tk.BooleanVar(value=self.cfg.get("npc_ding", True))
+        cb = ttk.Checkbutton(bottom, text="Ding for listings under the NPC sell price", variable=self.npc_ding_on,
+                             command=self._save_sound_prefs)
+        cb.pack(side="left", padx=(10, 0))
+        tip("A listing cheaper than what an NPC pays for the item (dark green in Live and Deals) "
+            "plays the alert sound.", cb)
         ttk.Button(bottom, text="Test sound", command=self.test_sound).pack(side="left", padx=(10, 0))
         ttk.Button(bottom, text="Choose sound", command=self.choose_sound).pack(side="left", padx=4)
         self.sound_lbl = ttk.Label(bottom, foreground="#666")
@@ -4930,11 +4974,13 @@ class App:
         mfm.save_ignorelist(self.ignored)
         for k in self.live.get_children():   # re-tag the current shop's rows
             if self.live.set(k, "item") in items:
-                tags = [t for t in self.live.item(k, "tags") if t not in ("ignored", "deal", "high", "unknown")]
+                tags = [t for t in self.live.item(k, "tags") if t not in ("ignored", "deal", "high", "unknown", "npc")]
                 if on and "sold" not in tags:
                     tags.append("ignored")
                 elif not on:
-                    tags.append(tag_for(self.live.set(k, "verdict")))
+                    each = mfm.parse_price(self.live.set(k, "each") or "") if self.live.set(k, "each") else None
+                    tags.append("npc" if "sold" not in tags and below_npc(self.live.set(k, "item"), each)
+                                else tag_for(self.live.set(k, "verdict")))
                 self.live.item(k, tags=tags)
         self.refresh_tables()
         what = f"'{items[0]}'" if len(items) == 1 else f"{len(items)} items"
@@ -4960,6 +5006,8 @@ class App:
     def _save_sound_prefs(self):
         self.cfg["alert_sound_on"] = self.sound_on.get()
         self.cfg["alert_raise"] = self.raise_on.get()
+        if hasattr(self, "npc_ding_on"):
+            self.cfg["npc_ding"] = self.npc_ding_on.get()
         mfm.save_config(self.cfg)
 
     def test_sound(self):

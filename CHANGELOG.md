@@ -1,5 +1,14 @@
 # Changelog
 
+## 2610.23.001 — 2026-10-23
+
+### New
+- **NPC sell price in Live and Deals:** a column with what an NPC pays for the item.
+  A listing cheaper than that is shown in a darker green than a deal and dings (the
+  alert sound, without bringing the window to the front). Turn the ding off in the
+  Watched tab (**Ding for listings under the NPC sell price**). **Deals only** in Deals
+  includes them.
+
 ## 2610.22.002 — 2026-10-22
 
 ### Fixed

@@ -89,7 +89,7 @@ def data_dir() -> Path:
 
 
 # Shown to you: YYMM.minor.hotfix. The codename is for development notes only.
-VERSION = "2610.22.002"
+VERSION = "2610.23.001"
 CODENAME = "npcprices"
 
 DATA = data_dir()
@@ -161,6 +161,7 @@ DEFAULT_CONFIG = {
     "update_check": True,      # look for a new version at launch (and daily)
     "update_skip": "",         # a version you chose to skip
     "channel_prompt": True,    # ask for the channel at launch and after a channel change
+    "npc_ding": True,          # a sound for a listing under the NPC sell price
     "review_on": True,         # the Review tab (names to match to items); off hides it
     "channel_count": 40,       # channels shown in the channel picker (1-100)
     "hotkeys_on": False,       # the keys below work while the game has focus (off until turned on)
