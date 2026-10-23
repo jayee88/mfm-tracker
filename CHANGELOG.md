@@ -1,5 +1,10 @@
 # Changelog
 
+## 2610.23.003 — 2026-10-23
+
+### Changed
+- The warning about a large price database now shows past 1 GB (it was 100 MB).
+
 ## 2610.23.002 — 2026-10-23
 
 ### Changed

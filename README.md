@@ -469,7 +469,7 @@ right away. This runs at start and every 6 hours (megaphones: as they're read).
 | OCR training pictures | `ocr-training.db` | 60 days | keep | `ocr-training-archive.db` |
 
 The app's own shorthand words (aliases like "att" = Attack) are always kept. A red warning
-appears if the price database grows past 100 MB.
+appears if the price database grows past 1 GB.
 
 ## Your data
 

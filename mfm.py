@@ -89,7 +89,7 @@ def data_dir() -> Path:
 
 
 # Shown to you: YYMM.minor.hotfix. The codename is for development notes only.
-VERSION = "2610.23.002"
+VERSION = "2610.23.003"
 CODENAME = "npcprices"
 
 DATA = data_dir()
@@ -9229,7 +9229,7 @@ def _stamp() -> str:
 
 ARCHIVE_DIR = DATA / "archives"
 ARCHIVE_NAME = "prices-archive.db"
-DB_WARN_BYTES = 100 * 1024 * 1024     # warn when prices.db grows past 100 MB
+DB_WARN_BYTES = 1024 * 1024 * 1024    # warn when prices.db grows past 1 GB
 _AGE = "COALESCE(sold_ts, last_seen, ts)"   # a listing's age: when it was last seen (or sold)
 
 
