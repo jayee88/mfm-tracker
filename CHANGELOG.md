@@ -9,6 +9,14 @@
   Watched tab (**Ding for listings under the NPC sell price**). **Deals only** in Deals
   includes them. They're a sure profit, so they're shown and ding even for ignored items.
 
+### Changed
+- **Required sightings count players, not listings.** Each player counts once towards
+  the sightings an item needs before it gets a market price, DEAL / HIGH and outliers,
+  however many of their listings were seen: 6 sightings from 6 players plus 5 from one
+  more player count as 7. One seller can't set an item's price on their own. (A listing
+  with no player name read counts by its shop name.) The setting is now called
+  **Required sightings (different players)**.
+
 ## 2610.22.002 — 2026-10-22
 
 ### Fixed

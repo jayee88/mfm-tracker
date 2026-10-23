@@ -337,8 +337,10 @@ An item's market price is:
 2. the median of the prices you've seen over the last 14 days (only sold prices, once it
    has sold at least twice).
 
-Your own sightings only count once an item has been seen **5 times** (Settings →
-**Required sightings before judging**). Until then it shows no DEAL or HIGH.
+Your own sightings only count once an item has been seen from **5 different players** (Settings →
+**Required sightings (different players)**). Each player counts once, however many of
+their listings you've seen, so one seller can't set an item's price. Until then it shows
+no DEAL or HIGH.
 
 **Outliers:** troll prices and misreads far from an item's usual price are left out of its
 market price. Very low ones still show as deals; very high ones show as **OUTLIER**. Adjust
@@ -405,7 +407,7 @@ map lists). Rest the mouse on any setting for a short explanation.
 | Empty frames = shop closed | 3 | reads without a shop before it counts as closed |
 | Market median window (days) | 14 | how many days of sightings make the market price |
 | OCR upscale factor | 3 | raise it if small text is misread |
-| Required sightings before judging | 5 | sightings needed before an item gets a market price, DEAL / HIGH, and outliers |
+| Required sightings (different players) | 5 | sightings needed before an item gets a market price, DEAL / HIGH, and outliers; each player counts once |
 | Flag DEAL / HIGH at ± % | 15 | how far from the market price a listing must be |
 | Outliers: ceiling / floor | 200% / 75% | how far above / below the usual price counts as an outlier |
 | Ask for the channel at launch and after a channel change | on | the channel prompt |

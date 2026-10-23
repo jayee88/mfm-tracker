@@ -152,7 +152,7 @@ DEFAULT_CONFIG = {
     "deal_threshold_pct": 15,  # flag listings this % below/above market
     "history_days": 14,        # window for computing market rate from your logs
     "outliers_on": True,       # ignore absurd prices once an item has enough sightings
-    "min_sightings": 5,        # sightings an item needs before it's judged (market price,
+    "min_sightings": 5,        # sightings (from different players) an item needs before it's judged (market price,
                                # DEAL / HIGH, outliers)
     "outlier_ceiling_pct": 200,  # more than this % ABOVE the median is an outlier (200 = 3x)
     "outlier_floor_pct": 75,     # more than this % BELOW the median is an outlier (75 = 1/4)
@@ -6322,7 +6322,7 @@ def outlier_bounds(con, item: str, cfg: dict) -> tuple[float, float] | None:
     unit = [p for (p,) in con.execute(
         "SELECT price FROM listings WHERE item = ? AND COALESCE(last_seen, ts) >= ?",
         (item, since))]
-    if len(unit) < max(3, min_sightings(cfg)):
+    if len(unit) < 3 or sighting_count(con, item, since) < min_sightings(cfg):
         return None
     med = statistics.median(unit)
     lo = med * max(0.0, 1 - float(cfg.get("outlier_floor_pct", 75)) / 100)
@@ -6358,10 +6358,22 @@ def price_stats(con, item: str, cfg: dict, bounds="auto") -> dict:
     }
 
 
+def sighting_count(con, item: str, since: str) -> int:
+    """Sightings of an item since `since` that count towards min_sightings: one per
+    player (the same player's listings, however many, count once), so one seller
+    can't set an item's price alone. A listing with no player name read counts by
+    its shop name, and one with neither counts on its own."""
+    return con.execute(
+        "SELECT COUNT(DISTINCT COALESCE(NULLIF(LOWER(TRIM(seller)), ''), 'shop:' || NULLIF(LOWER(TRIM(shop)), ''), "
+        "'row:' || id)) FROM listings WHERE item = ? AND COALESCE(last_seen, ts) >= ?",
+        (item, since)).fetchone()[0]
+
+
 def min_sightings(cfg: dict) -> int:
-    """Sightings an item needs (in the history window) before it's judged: before
-    your own sightings give it a market price, and so before DEAL / HIGH, and
-    before unusual prices are set aside as outliers."""
+    """Sightings an item needs (in the history window, from different players: see
+    sighting_count) before it's judged: before your own sightings give it a market
+    price, and so before DEAL / HIGH, and before unusual prices are set aside as
+    outliers."""
     try:
         return max(1, int(cfg.get("min_sightings", 5)))
     except (TypeError, ValueError):
@@ -6379,10 +6391,9 @@ def market_rate(con, item: str, cfg: dict) -> tuple[int | None, str]:
     if ref:
         return ref[0], ref[1] or "reference"
     need = min_sightings(cfg)
-    seen = con.execute("SELECT COUNT(*) FROM listings WHERE item = ? AND COALESCE(last_seen, ts) >= ?",
-                       (item, utc_ago(days=cfg["history_days"]))).fetchone()[0]
+    seen = sighting_count(con, item, utc_ago(days=cfg["history_days"]))
     if seen < need:
-        return None, f"not enough data ({seen} of {need} sightings)"
+        return None, f"not enough data ({seen} of {need} players)"
     bounds = outlier_bounds(con, item, cfg)
     st = price_stats(con, item, cfg, bounds)
     skipped = f", {st['outliers']} outlier{'s' if st['outliers'] != 1 else ''} ignored" if st["outliers"] else ""
