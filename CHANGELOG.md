@@ -2,6 +2,17 @@
 
 ## 2610.22.002 — 2026-10-22
 
+### New
+- **Deals → NPC resale:** tick it to see only listings priced under what an NPC pays for
+  the item, biggest profit first, whatever the market rate says. Two new columns in Deals,
+  **NPC sell** (what an NPC pays for one) and **NPC profit** ((NPC sell − price) × quantity:
+  what you'd make buying the whole bundle and selling it to an NPC), show for every
+  listing whose item has an NPC price.
+- **Deals → Bought** (and **Bought this listing** in the right-click menu of Deals and
+  Live): the selected listings were bought, to use or to sell on. They're marked sold, the
+  way a listing that faded from its shop is, so they leave Deals and count as sales at
+  that price. **Include sold** shows them again.
+
 ### Fixed
 - **Megaphones stopped being read.** A chat area drawn while the app was reading the whole
   screen was ignored once it read the game's window (and the other way round), so the chat

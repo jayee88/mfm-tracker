@@ -6781,6 +6781,19 @@ def forget_item(con, item: str, scope: dict | None = None) -> int:
     return n
 
 
+def bought_listing(con, item: str, scope: dict | None = None) -> int:
+    """You bought a listing (a deal, or one to sell on to an NPC): it's marked sold
+    now, the way a listing that faded from its shop is, so it leaves Deals and counts
+    as a sale at its price. With `scope`, just that shop's listing. Returns how many
+    rows were marked."""
+    extra, args = _scope_sql(scope)
+    now = utc_now()
+    n = con.execute(f"UPDATE listings SET sold = 1, sold_ts = ?, last_seen = ? "
+                    f"WHERE item = ? AND COALESCE(sold, 0) = 0{extra}", [now, now, item] + args).rowcount
+    con.commit()
+    return n
+
+
 def _ids_sql(ids) -> tuple[str, list[int]]:
     ids = [int(i) for i in ids]
     return ",".join("?" * len(ids)), ids

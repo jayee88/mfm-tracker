@@ -157,7 +157,12 @@ the game runs in a window (or borderless), not in exclusive full screen.
 - **Live:** the shop you're in, filling in as you scroll. Green = DEAL, red = HIGH,
   grey = no market price yet, faded = sold.
 - **Deals:** listings still for sale, best deals first. Tick **Include sold** to see sold
-  ones, or **Watched items** to see only watched items and listings.
+  ones, or **Watched items** to see only watched items and listings. **NPC resale** keeps
+  only listings priced under what an NPC pays for the item, biggest profit first, whatever
+  the market rate says: the **NPC sell** and **NPC profit** columns show what an NPC pays
+  for one and what you'd make buying the whole bundle and selling it to an NPC. Select a
+  listing you bought and click **Bought** (or right-click → **Bought this listing**): it's
+  marked sold, so it leaves Deals and counts as a sale at that price.
 - **Items:** every item you've seen: the cheapest listing still for sale and where it is,
   listed and sold prices, market price, the median prices in selling and buying
   megaphones, and the NPC buy / sell prices. Filter by name,
@@ -181,7 +186,8 @@ Double-click any item for its **price history**: a chart and every sighting, plu
 change its price or channel, add a note, watch it, or delete it.
 
 Right-click items in any table for more options: watch the item, add a note, watch the
-listing, ignore, match to the right item, delete a bad read, or look the item up on meowdb.
+listing, ignore, match to the right item, mark a listing you bought as sold, delete a bad
+read, or look the item up on meowdb.
 
 ## Megaphones
 
