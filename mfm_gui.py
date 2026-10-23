@@ -565,9 +565,12 @@ def sort_tree(tree, col, reverse):
     rows = [(tree.set(k, col), k) for k in tree.get_children("")]
     key = (lambda r: num(r[0])) if col in NUMERIC else (lambda r: r[0].lower())
     rows.sort(key=key, reverse=reverse)
-    for i, (_, k) in enumerate(rows):
-        tree.move(k, "", i)
+    # one call, not a move per row: a move walks the rows before it, which took
+    # minutes on a Deals table of 70,000 rows (720 hours)
+    tree.set_children("", *[k for _, k in rows])
     tree.heading(col, command=lambda: sort_tree(tree, col, not reverse))
+    # remembered, so a refill (every 5 seconds while monitoring) keeps the order you chose
+    tree.sort_by = (col, reverse)
 
 
 def npc_sell_price(item: str) -> int | None:
@@ -2168,6 +2171,8 @@ class App:
         top = tree.yview()[0]
 
         def restore():
+            if getattr(tree, "sort_by", None):      # the column you sorted by, kept
+                sort_tree(tree, *tree.sort_by)
             if chosen:   # (nothing was selected: don't read every row's columns for nothing)
                 again = [k for k in tree.get_children("") if key(tree, k) in chosen]
                 if again:
