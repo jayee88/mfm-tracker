@@ -2125,7 +2125,9 @@ class App:
 
     def run_retention(self, quiet=False, cfg=None, done=None):
         cfg = cfg or self.cfg
-        if cfg.get("retention", "archive") not in ("archive", "delete") or getattr(self, "_pruning", False):
+        if getattr(self, "_pruning", False) or (
+                cfg.get("retention", "archive") not in ("archive", "delete")
+                and all(mfm.retention_of(cfg, k)[0] == "keep" for k in ("aliases", "ocr"))):
             return
         self._pruning = True
 
@@ -2133,6 +2135,14 @@ class App:
             try:
                 con = mfm.db()
                 n, path = mfm.apply_retention(con, cfg)
+                for kind in ("aliases", "ocr"):     # (megaphones: as they're read; see purge_megaphones)
+                    try:
+                        k, kpath = mfm.apply_kind_retention(con, cfg, kind)
+                        if k:
+                            self.events.put(("status", f"Removed {k:,} old {'aliases' if kind == 'aliases' else 'OCR training pictures'}"
+                                                       + (f"; archived to {kpath}." if kpath else ".")))
+                    except Exception as e:
+                        self.events.put(("error", f"couldn't clean up old {kind}: {e}"))
                 con.close()
                 try:
                     mfm.purge_shots(float(cfg.get("shot_days", 7)))
@@ -2790,7 +2800,8 @@ class App:
         sp.pack(side="left", padx=4)
         sp.bind("<Return>", lambda e: self._mega_hours_changed())
         sp.bind("<FocusOut>", lambda e: self._mega_hours_changed())
-        tip("Megaphones older than this are deleted.", sp)
+        tip("How far back megaphones are shown. Older ones are then deleted, archived or kept, "
+            "as Settings → Data says.", sp)
         ttk.Label(top, text="hours. Newest first, read from the chat window while monitoring.").pack(side="left")
         self._alias_buttons(top).pack(side="left", padx=(12, 0))
         # filter: only megaphones whose message has every word typed here
@@ -2952,7 +2963,7 @@ class App:
             try:
                 if purge:
                     try:
-                        mfm.purge_megaphones(con, hours)
+                        mfm.purge_megaphones(con, hours, cfg)
                         data["purged"] = True
                     except sqlite3.OperationalError:
                         con.rollback()
@@ -6049,6 +6060,92 @@ class App:
             show(name)
         return box, lambda: (on.get(), dict(keys))
 
+    def _retention_box(self, parent, win, kind, title, unit, what, arch):
+        """Settings → Data: how long megaphones / aliases / OCR training pictures are
+        kept, and then archive, delete or keep. Returns the box and a function giving
+        the settings."""
+        box = ttk.LabelFrame(parent, text=title, padding=(10, 2, 10, 4))
+        mode_now, days_now = mfm.retention_of(self.cfg, kind)
+        r1 = ttk.Frame(box)
+        r1.pack(anchor="w", pady=(0, 2))
+        ttk.Label(r1, text="Keep for").pack(side="left")
+        keep = tk.StringVar(value=str(int(self.cfg.get("megaphone_hours", 72)) if kind == "megaphones"
+                                      else int(days_now)))
+        sp = ttk.Spinbox(r1, from_=1, to=720 if kind == "megaphones" else 3650, increment=1, width=6,
+                         textvariable=keep)
+        sp.pack(side="left", padx=6)
+        ttk.Label(r1, text=unit).pack(side="left")
+        tip({"megaphones": "Megaphones older than this. Also how far back the Megaphones tab shows "
+                           "(the same as its Keep megaphones for box).",
+             "aliases": "Aliases nobody has changed for this long (the app's own shorthand words are "
+                        "always kept).",
+             "ocr": "OCR training pictures collected this long ago (checked or not)."}[kind], sp)
+        mode = tk.StringVar(value=mode_now)
+        r2 = ttk.Frame(box)
+        r2.pack(anchor="w", pady=(0, 2))
+        ttk.Label(r2, text="Then:").pack(side="left")
+        for val, text in (("archive", "Archive, then delete"), ("delete", "Delete"), ("keep", "Keep everything")):
+            ttk.Radiobutton(r2, text=text, value=val, variable=mode).pack(side="left", padx=(8, 0))
+        r3 = ttk.Frame(box)
+        r3.pack(fill="x", pady=(3, 0))
+        size_lbl = ttk.Label(r3, foreground="#666")
+
+        def get():
+            try:
+                n = max(1, int(float(keep.get())))
+            except ValueError:
+                n = 72 if kind == "megaphones" else int(mfm.RETENTION_DEFAULTS[kind][1])
+            out = {f"{kind}_retention": mode.get()}
+            out["megaphone_hours" if kind == "megaphones" else f"{kind}_keep_days"] = n
+            return out
+
+        def days_of(c):
+            return mfm.retention_of(c, kind)[1]
+
+        def show_size():
+            c = {**self.cfg, **get()}
+            try:
+                old = mfm.old_count(self.con, kind, days_of(c))
+            except Exception:
+                old = 0
+            size_lbl.config(text=f"{mfm.kind_size(kind) / 1048576:,.1f} MB  ·  {old:,} older than that")
+
+        def clean_now():
+            c = {**self.cfg, **get(), "archive_dir": arch()}
+            m = c[f"{kind}_retention"]
+            if m == "keep":
+                m = "archive"
+            n = mfm.old_count(self.con, kind, days_of(c))
+            if not n:
+                messagebox.showinfo("Clean up now", f"No {what} are that old.", parent=win)
+                return
+            dest = (f"archived to {mfm.archive_dir(c) / mfm.RETENTION_KINDS[kind][1]} and then deleted"
+                    if m == "archive" else "deleted for good")
+            if not messagebox.askyesno("Clean up now", f"{n:,} {what} will be {dest}.\n\nContinue?", parent=win):
+                return
+
+            def work():
+                con = mfm.db()
+                try:
+                    k, path = mfm.prune_kind(con, kind, days_of(c), mfm.archive_dir(c) if m == "archive" else None)
+                    self.events.put(("status", f"Removed {k:,} {what}" + (f"; archived to {path}." if path else ".")))
+                except Exception as e:
+                    msg = f"Cleaning up {what} failed: {e}"
+                    self.events.put(("call", lambda: self.report_error("Cleanup failed", msg)))
+                finally:
+                    con.close()
+                self.events.put(("call", lambda: size_lbl.winfo_exists() and show_size()))
+                if kind == "megaphones":
+                    self.events.put(("call", lambda: self.refresh_megaphones(delay=10)))
+            threading.Thread(target=work, daemon=True).start()
+        bc = ttk.Button(r3, text="Clean up now", command=clean_now)
+        bc.pack(side="left")
+        tip(f"Cleans up old {what} now (archiving them, unless Delete is chosen).", bc)
+        size_lbl.pack(side="left", padx=(8, 0))
+        keep.trace_add("write", lambda *a: show_size())
+        show_size()
+        return box, get
+
     def _window_detection_frame(self, win):
         """Settings → Reading → Window detection: each capture area, found automatically or drawn
         by hand (with its coordinates), a button to draw it and one to go back to automatic."""
@@ -6154,9 +6251,11 @@ class App:
         gen = ttk.Frame(nb, padding=(0, 8, 0, 4))
         rd = ttk.Frame(nb, padding=(12, 10, 12, 8))
         gd = ttk.Frame(nb, padding=(12, 10, 12, 8))
+        dt = ttk.Frame(nb, padding=(12, 10, 12, 8))
         nb.add(gen, text="  General  ")
         nb.add(rd, text="  Reading  ")
         nb.add(gd, text="  Game data  ")
+        nb.add(dt, text="  Data  ")
         try:
             nb.select(int(self.cfg.get("settings_tab", 0)))
         except (tk.TclError, ValueError, TypeError):
@@ -6210,9 +6309,13 @@ class App:
             spin.grid(row=i, column=1, padx=12, pady=4)
             tip(tips[key], lbl, spin)
             vars_[key] = (v, type(mfm.DEFAULT_CONFIG[key]))
-        # ---- data retention (top right)
-        ret = ttk.LabelFrame(gen, text=" Data retention ", padding=(10, 2, 10, 4))
-        ret.grid(row=0, column=2, rowspan=5, sticky="nwe", padx=(0, 12), pady=(4, 0))
+        # ---- data retention: the Data tab, a box per file
+        ttk.Label(dt, foreground="#666", wraplength=640, justify="left", text=(
+            "Each kind of data is kept in a file of its own (in the data folder's prices folder). Choose how long "
+            "each is kept, and then whether it's moved to an archive file in the archive folder, "
+            "deleted, or kept forever.")).pack(anchor="w", pady=(0, 6))
+        ret = ttk.LabelFrame(dt, text=" Listings (prices.db) ", padding=(10, 2, 10, 4))
+        ret.pack(fill="x")
         r1 = ttk.Frame(ret)
         r1.pack(anchor="w", pady=(0, 2))
         keep_var = tk.StringVar(value=str(self.cfg.get("keep_days", 30)))
@@ -6244,7 +6347,7 @@ class App:
             tip(t, rb)
         r2 = ttk.Frame(ret)
         r2.pack(fill="x")
-        ttk.Label(r2, text="Archive to:").pack(side="left", padx=(0, 6))
+        ttk.Label(r2, text="Archive folder (every kind):").pack(side="left", padx=(0, 6))
         arch_var = tk.StringVar(value=str(mfm.archive_dir(self.cfg)))
         ea = ttk.Entry(r2, textvariable=arch_var, width=26)
         ea.pack(side="left", fill="x", expand=True)
@@ -6256,7 +6359,8 @@ class App:
                 arch_var.set(d)
         bb = ttk.Button(r2, text="Browse", command=browse)
         bb.pack(side="left", padx=(6, 0))
-        tip(f"The folder for {mfm.ARCHIVE_NAME}.", ea, bb)
+        tip(f"The folder for the archive files: {mfm.ARCHIVE_NAME}, and one each for megaphones, "
+            "aliases and OCR training pictures.", ea, bb)
         r3 = ttk.Frame(ret)
         r3.pack(fill="x", pady=(3, 0))
         size_lbl = ttk.Label(r3, foreground="#666")
@@ -6303,6 +6407,15 @@ class App:
         size_lbl.pack(side="left", padx=(8, 0))
         keep_var.trace_add("write", lambda *a: show_size())
         show_size()
+        kinds = {}
+        for kind, title, unit, what in (
+                ("megaphones", " Megaphones (megaphones.db) ", "hours", "megaphones"),
+                ("aliases", " Aliases (aliases.db) ", "days unchanged", "aliases"),
+                ("ocr", " OCR training pictures (ocr-training.db) ", "days", "pictures")):
+            box, get = self._retention_box(dt, win, kind, title, unit, what,
+                                           lambda: arch_var.get().strip() or None)
+            box.pack(fill="x", pady=(8, 0))
+            kinds[kind] = get
 
         save_caps = tk.BooleanVar(value=self.cfg.get("save_captures", False))
         self._window_detection_frame(rd).pack(fill="x")
@@ -6316,10 +6429,10 @@ class App:
         chan_prompt = tk.BooleanVar(value=self.cfg.get("channel_prompt", True))
         cb = ttk.Checkbutton(gen, text="Ask for the channel at launch and after a channel change",
                              variable=chan_prompt)
-        cb.grid(row=5, column=2, sticky="w", padx=(0, 12), pady=4)
+        cb.grid(row=0, column=2, sticky="w", padx=(0, 12), pady=4)
         tip("Asks for your channel when the app opens and after you change channel in the game.", cb)
         rc = ttk.Frame(gen)
-        rc.grid(row=6, column=2, sticky="w", padx=(0, 12), pady=4)
+        rc.grid(row=1, column=2, sticky="w", padx=(0, 12), pady=4)
         chan_count = tk.StringVar(value=str(self.cfg.get("channel_count", 40)))
         lc = ttk.Label(rc, text="Channels in the channel picker")
         lc.pack(side="left")
@@ -6329,10 +6442,10 @@ class App:
         outliers_on = tk.BooleanVar(value=self.cfg.get("outliers_on", True))
         cb = ttk.Checkbutton(gen, text="Ignore outliers in market rates",
                              variable=outliers_on)
-        cb.grid(row=len(fields) - 3, column=2, sticky="w", padx=(0, 12))
+        cb.grid(row=3, column=2, sticky="w", padx=(0, 12))
         review_on = tk.BooleanVar(value=self.cfg.get("review_on", True))
         cbr = ttk.Checkbutton(gen, text="Show the Review tab (names to match to items)", variable=review_on)
-        cbr.grid(row=len(fields) - 4, column=2, sticky="w", padx=(0, 12))
+        cbr.grid(row=2, column=2, sticky="w", padx=(0, 12))
         tip("Off hides the Review tab, and the app stops working out the names to review. "
             "Names are still matched by the aliases you've taught.", cbr)
         tip("Leaves troll prices and misreads out of the market price. "
@@ -6342,7 +6455,7 @@ class App:
         hot_box.grid(row=len(fields), column=0, columnspan=2, sticky="nwe", padx=12, pady=(8, 0))
         # ---- the widget over the game (next to the hotkeys)
         ov_box = ttk.LabelFrame(gen, text=" Widget ", padding=(10, 2, 10, 6))
-        ov_box.grid(row=len(fields), column=2, sticky="nwe", padx=(0, 12), pady=(8, 0))
+        ov_box.grid(row=6, column=2, rowspan=2, sticky="nwe", padx=(0, 12), pady=(8, 0))
         overlay_on = tk.BooleanVar(value=bool(self.cfg.get("overlay_on", True)))
         cb = ttk.Checkbutton(ov_box, text="Show the widget over the game", variable=overlay_on)
         cb.pack(anchor="w")
@@ -6352,7 +6465,7 @@ class App:
 
         # ---- updates (under the channel picker)
         upd = ttk.LabelFrame(gen, text=" Updates ", padding=(10, 2, 10, 6))
-        upd.grid(row=len(fields) - 2, column=2, rowspan=2, sticky="nwe", padx=(0, 12), pady=(6, 0))
+        upd.grid(row=4, column=2, rowspan=2, sticky="nwe", padx=(0, 12), pady=(6, 0))
         update_check = tk.BooleanVar(value=self.cfg.get("update_check", True))
         cb = ttk.Checkbutton(upd, text="Check for updates when the app opens", variable=update_check)
         cb.pack(anchor="w")
@@ -6379,6 +6492,10 @@ class App:
                         "Save anyway?", parent=win):
                     return
             self.cfg.update(c)
+            for get in kinds.values():
+                self.cfg.update(get())
+            if hasattr(self, "mega_hours"):
+                self.mega_hours.set(int(self.cfg.get("megaphone_hours", 72)))
             self.cfg["save_captures"] = save_caps.get()
             self.cfg["ocr_collect"], self.cfg["ocr_share"] = ocr_vars[0].get(), ocr_vars[1].get()
             self.cfg["ocr_collect_stores"], self.cfg["ocr_collect_players"] = ocr_vars[2].get(), ocr_vars[3].get()

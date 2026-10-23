@@ -395,9 +395,9 @@ Exported files get the date and time in their name, e.g.
 
 ## Settings
 
-Settings has three tabs: **General** (capturing, market prices, data retention, the
-channel and updates), **Reading** (Window detection and OCR training) and **Game data** (the item and
-map lists). Rest the mouse on any setting for a short explanation.
+Settings has four tabs: **General** (capturing, market prices, the channel, updates,
+hotkeys and the widget), **Reading** (Window detection and OCR training), **Game data** (the
+item and map lists) and **Data** (how long each kind of data is kept). Rest the mouse on any setting for a short explanation.
 
 | Setting | Default | What it does |
 |---|---|---|
@@ -456,9 +456,20 @@ Alt or Shift if you like); × leaves an action without a key. The game sees the 
 so pick ones it doesn't use. On Wayland they work while an X11 window has focus, like the
 game run through Wine or Proton. From source, they need `pip install pynput`.
 
-**Data retention:** listings not seen for 30 days are copied to an archive file and then
-removed (or just deleted, or kept forever). This runs at start, every 6 hours, and when you
-click **Clean up now**. A red warning appears if the price database grows past 100 MB.
+**Data retention (Settings → Data):** each kind of data has its own file and its own
+setting: how long it's kept, and then **Archive, then delete** (copied to an archive file
+in the archive folder first), **Delete**, or **Keep everything**. **Clean up now** does it
+right away. This runs at start and every 6 hours (megaphones: as they're read).
+
+| Kind | File | Kept for (default) | Then (default) | Archive file |
+|---|---|---|---|---|
+| Listings | `prices.db` | 30 days not seen | archive | `prices-archive.db` |
+| Megaphones | `megaphones.db` | 72 hours | delete | `megaphones-archive.db` |
+| Aliases | `aliases.db` | 365 days unchanged | keep | `aliases-archive.db` |
+| OCR training pictures | `ocr-training.db` | 60 days | keep | `ocr-training-archive.db` |
+
+The app's own shorthand words (aliases like "att" = Attack) are always kept. A red warning
+appears if the price database grows past 100 MB.
 
 ## Your data
 
@@ -468,11 +479,11 @@ Everything is kept in one folder: `%APPDATA%\mfm-tracker` (Windows),
 
 | Folder | Contents |
 |---|---|
-| `prices/` | your prices and megaphones (`prices.db`) |
+| `prices/` | your prices (`prices.db`), megaphones (`megaphones.db`), aliases (`aliases.db`) and OCR training pictures (`ocr-training.db`), each in its own file |
 | `inventory/` | My Inventory (`inventory.db`) |
 | `settings/` | settings, watched items and listings, ignore list, manual matches, Shared Database sign-in |
 | `cache/` | downloaded item and map lists, icons |
-| `archives/` | old listings moved out by data retention |
+| `archives/` | old listings, megaphones, aliases and OCR training pictures moved out by data retention |
 | `backups/` | copies made before anything is cleared |
 
 **Settings → Clear pricing data** and **Reset personal settings** ask twice and save a

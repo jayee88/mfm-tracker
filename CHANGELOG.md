@@ -1,5 +1,22 @@
 # Changelog
 
+## 2610.23.002 — 2026-10-23
+
+### Changed
+- **Megaphones, aliases and OCR training pictures each have their own file** next to
+  `prices.db`: `megaphones.db`, `aliases.db` and `ocr-training.db`. They're moved out of
+  `prices.db` the first time this version starts (nothing to do).
+- **Settings → Data** (a new tab): how long each kind is kept (listings, megaphones,
+  aliases, OCR training pictures), and then **Archive, then delete**, **Delete** or **Keep
+  everything**, each with its own **Clean up now** and file size. Archives go to the
+  archive folder: `megaphones-archive.db`, `aliases-archive.db` and
+  `ocr-training-archive.db` next to `prices-archive.db`. Defaults: megaphones deleted after
+  72 hours (as before), aliases and OCR training pictures kept.
+- Settings → General: data retention moved to the Data tab.
+- **Shared Database server 2.8.0** keeps megaphones, aliases and OCR training lines in
+  `megaphones.db`, `aliases.db` and `ocr-training.db` next to `mfm-server.db` (moved there
+  when it starts). `mfm-server backup FOLDER` copies all four while it runs.
+
 ## 2610.23.001 — 2026-10-23
 
 ### New

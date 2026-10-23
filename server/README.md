@@ -201,6 +201,7 @@ Run these on the server computer, in the folder with `docker-compose.yml`:
 | `docker compose exec mfm-server mfm-server remove-user NAME` | delete an account (what it sent stays, with its name and id) |
 | `docker compose exec mfm-server mfm-server stats` | how much is stored, and from whom |
 | `docker compose exec mfm-server mfm-server purge WHAT WHEN` | delete stored data (see below) |
+| `docker compose exec mfm-server mfm-server backup /data/backup` | a copy of the database files, while it runs (see Backups) |
 | `docker compose exec mfm-server mfm-server export-ocr /data/ocr.zip` | the OCR training lines the apps sent (see below) |
 | `docker compose logs -f mfm-server` | the server's log |
 | `docker compose pull && docker compose up -d` | update to the latest version |
@@ -257,15 +258,18 @@ docker compose cp mfm-server:/data/ocr.zip ./ocr.zip
 
 ## Backups
 
-The database is the file `mfm-server.db` in the `mfm-data` volume. To copy it out:
+The data is in four files in the `mfm-data` volume: `mfm-server.db` (accounts, prices
+and the log), `megaphones.db`, `aliases.db` and `ocr-training.db`. Servers before 2.8.0
+kept everything in `mfm-server.db`; it's split into these files when 2.8.0 starts. To copy
+them out while the server runs:
 
 ```
-docker compose exec mfm-server sh -c "python -c \"import sqlite3; s=sqlite3.connect('/data/mfm-server.db'); s.backup(sqlite3.connect('/data/backup.db'))\""
-docker compose cp mfm-server:/data/backup.db ./mfm-server-backup.db
+docker compose exec mfm-server mfm-server backup /data/backup
+docker compose cp mfm-server:/data/backup ./mfm-server-backup
 ```
 
-To restore, stop the server, copy the file back as `/data/mfm-server.db`
-(`docker compose cp ./mfm-server-backup.db mfm-server:/data/mfm-server.db`), and start it.
+To restore, stop the server, copy the four files back into `/data`
+(`docker compose cp ./mfm-server-backup/. mfm-server:/data/`), and start it.
 
 ## Troubleshooting
 

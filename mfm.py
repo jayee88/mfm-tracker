@@ -89,7 +89,7 @@ def data_dir() -> Path:
 
 
 # Shown to you: YYMM.minor.hotfix. The codename is for development notes only.
-VERSION = "2610.23.001"
+VERSION = "2610.23.002"
 CODENAME = "npcprices"
 
 DATA = data_dir()
@@ -105,7 +105,14 @@ CACHE_DIR = DATA / "cache"
 BACKUP_DIR = DATA / "backups"
 for _d in (PRICES_DIR, SETTINGS_DIR, CACHE_DIR):
     _d.mkdir(parents=True, exist_ok=True)
-DB_PATH = PRICES_DIR / "prices.db"
+DB_PATH = PRICES_DIR / "prices.db"                # listings and imported prices
+# kept in files of their own (attached to every connection, so queries use their tables
+# by name as before): each can be backed up, archived or deleted on its own
+MEGA_DB_PATH = PRICES_DIR / "megaphones.db"       # megaphones and what was read from them
+ALIASES_DB_PATH = PRICES_DIR / "aliases.db"       # what players call items in megaphones
+OCR_DB_PATH = PRICES_DIR / "ocr-training.db"      # pictures collected for OCR training
+DB_FILES = {"prices": DB_PATH, "megaphones": MEGA_DB_PATH, "aliases": ALIASES_DB_PATH,
+            "ocr": OCR_DB_PATH}
 ICONS_DB_PATH = CACHE_DIR / "icons.db"
 SHOTS_DB_PATH = CACHE_DIR / "shots.db"   # shop photos: the screen when a listing was logged
 CONFIG_PATH = SETTINGS_DIR / "config.json"
@@ -162,6 +169,11 @@ DEFAULT_CONFIG = {
     "update_skip": "",         # a version you chose to skip
     "channel_prompt": True,    # ask for the channel at launch and after a channel change
     "npc_ding": True,          # a sound for a listing under the NPC sell price
+    "megaphones_retention": "delete",   # megaphones older than megaphone_hours: archive, delete or keep
+    "aliases_retention": "keep",        # aliases not changed for aliases_keep_days: archive, delete or keep
+    "aliases_keep_days": 365,
+    "ocr_retention": "keep",            # OCR training pictures older than ocr_keep_days: archive, delete or keep
+    "ocr_keep_days": 60,
     "review_on": True,         # the Review tab (names to match to items); off hides it
     "channel_count": 40,       # channels shown in the channel picker (1-100)
     "hotkeys_on": False,       # the keys below work while the game has focus (off until turned on)
@@ -294,12 +306,33 @@ def _wal(con: sqlite3.Connection, *schemas: str) -> None:
             pass
 
 
+def _has_table(con, schema: str, table: str) -> bool:
+    return bool(con.execute(f"SELECT 1 FROM {schema}.sqlite_master WHERE type = 'table' AND name = ?",
+                            (table,)).fetchone())
+
+
+def _move_table(con, table: str, schema: str) -> bool:
+    """Move a table's rows from prices.db (main) into its own file (schema), where
+    the same table already exists, then drop it from prices.db."""
+    if not _has_table(con, "main", table):
+        return False
+    have = [r[1] for r in con.execute(f"PRAGMA main.table_info({table})")]
+    want = {r[1] for r in con.execute(f"PRAGMA {schema}.table_info({table})")}
+    cols = ", ".join(c for c in have if c in want)
+    con.execute(f"INSERT OR IGNORE INTO {schema}.{table} ({cols}) SELECT {cols} FROM main.{table}")
+    con.execute(f"DROP TABLE main.{table}")
+    con.commit()
+    return True
+
+
 def db() -> sqlite3.Connection:
     """Prices database, with the icon cache attached: queries can use `icons` as
     if it were part of it, but it lives in cache/icons.db."""
     con = sqlite3.connect(DB_PATH, timeout=10)
     con.execute("ATTACH DATABASE ? AS cache", (str(ICONS_DB_PATH),))
-    _wal(con, "main", "cache")
+    for path, schema in ((MEGA_DB_PATH, "megadb"), (ALIASES_DB_PATH, "aliasdb"), (OCR_DB_PATH, "ocrdb")):
+        con.execute("ATTACH DATABASE ? AS " + schema, (str(path),))
+    _wal(con, "main", "cache", "megadb", "aliasdb", "ocrdb")
     con.execute("""CREATE TABLE IF NOT EXISTS cache.icons (
             item TEXT PRIMARY KEY, png BLOB NOT NULL, faded INTEGER NOT NULL DEFAULT 0,
             updated TEXT, source TEXT)""")
@@ -337,7 +370,7 @@ def db() -> sqlite3.Connection:
             raw TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_item_ts ON listings(item, ts);
-        CREATE TABLE IF NOT EXISTS megaphones (
+        CREATE TABLE IF NOT EXISTS megadb.megaphones (
             id INTEGER PRIMARY KEY,
             ts TEXT NOT NULL,
             seen TEXT,
@@ -347,24 +380,24 @@ def db() -> sqlite3.Connection:
             kind TEXT,
             color TEXT
         );
-        CREATE INDEX IF NOT EXISTS idx_megaphones_ts ON megaphones(ts);
-        CREATE TABLE IF NOT EXISTS megaphone_offers (
+        CREATE INDEX IF NOT EXISTS megadb.idx_megaphones_ts ON megaphones(ts);
+        CREATE TABLE IF NOT EXISTS megadb.megaphone_offers (
             megaphone_id INTEGER NOT NULL,
             idx INTEGER NOT NULL,
             side TEXT, phrase TEXT, key TEXT, item TEXT, how TEXT,
             price INTEGER, note TEXT, suggest TEXT, score REAL,
             PRIMARY KEY (megaphone_id, idx)
         );
-        CREATE INDEX IF NOT EXISTS idx_offers_item ON megaphone_offers(item);
-        CREATE TABLE IF NOT EXISTS megaphones_deleted (uid TEXT PRIMARY KEY, ts TEXT);
-        CREATE TABLE IF NOT EXISTS aliases (
+        CREATE INDEX IF NOT EXISTS megadb.idx_offers_item ON megaphone_offers(item);
+        CREATE TABLE IF NOT EXISTS megadb.megaphones_deleted (uid TEXT PRIMARY KEY, ts TEXT);
+        CREATE TABLE IF NOT EXISTS aliasdb.aliases (
             key TEXT PRIMARY KEY,
             item TEXT,
             deleted INTEGER NOT NULL DEFAULT 0,
             added TEXT, by TEXT, updated TEXT,
             shared_sig TEXT
         );
-        CREATE TABLE IF NOT EXISTS ocr_lines (      -- chat line images for OCR training
+        CREATE TABLE IF NOT EXISTS ocrdb.ocr_lines (      -- chat line images for OCR training
             id INTEGER PRIMARY KEY,
             grp TEXT NOT NULL,                      -- the same line of the same megaphone
             ts TEXT NOT NULL,
@@ -377,8 +410,8 @@ def db() -> sqlite3.Connection:
             alts TEXT,                              -- the same image read by the other models (JSON)
             kind TEXT NOT NULL DEFAULT 'chat'       -- chat (megaphone line), store (shop title), player (shop owner)
         );
-        CREATE INDEX IF NOT EXISTS idx_ocr_grp ON ocr_lines(grp);
-        CREATE INDEX IF NOT EXISTS idx_ocr_status ON ocr_lines(status);
+        CREATE INDEX IF NOT EXISTS ocrdb.idx_ocr_grp ON ocr_lines(grp);
+        CREATE INDEX IF NOT EXISTS ocrdb.idx_ocr_status ON ocr_lines(status);
         CREATE TABLE IF NOT EXISTS reference (
             item TEXT PRIMARY KEY,
             price INTEGER NOT NULL,
@@ -387,14 +420,29 @@ def db() -> sqlite3.Connection:
         );
         """
     )
-    if "kind" not in {r[1] for r in con.execute("PRAGMA table_info(ocr_lines)")}:
-        con.execute("ALTER TABLE ocr_lines ADD COLUMN kind TEXT NOT NULL DEFAULT 'chat'")
-    mcols = {r[1] for r in con.execute("PRAGMA table_info(megaphones)")}
-    for col, typ in (("color", "TEXT"), ("votes", "TEXT"), ("conf", "REAL"), ("offers_sig", "TEXT"),
-                     # Shared Database: id on the server, synced values
-                     ("uid", "TEXT"), ("shared_sig", "TEXT")):
-        if col not in mcols:
-            con.execute(f"ALTER TABLE megaphones ADD COLUMN {col} {typ}")
+    for schema in ("megadb", "ocrdb", "main"):    # (main: an older prices.db, moved just below)
+        if _has_table(con, schema, "ocr_lines") and \
+                "kind" not in {r[1] for r in con.execute(f"PRAGMA {schema}.table_info(ocr_lines)")}:
+            con.execute(f"ALTER TABLE {schema}.ocr_lines ADD COLUMN kind TEXT NOT NULL DEFAULT 'chat'")
+        if _has_table(con, schema, "megaphones"):
+            mcols = {r[1] for r in con.execute(f"PRAGMA {schema}.table_info(megaphones)")}
+            for col, typ in (("color", "TEXT"), ("votes", "TEXT"), ("conf", "REAL"), ("offers_sig", "TEXT"),
+                             # Shared Database: id on the server, synced values
+                             ("uid", "TEXT"), ("shared_sig", "TEXT")):
+                if col not in mcols:
+                    con.execute(f"ALTER TABLE {schema}.megaphones ADD COLUMN {col} {typ}")
+    # 2610.23: megaphones, aliases and OCR training pictures moved out of prices.db
+    # into files of their own
+    moved = False
+    for table, schema in (("megaphones", "megadb"), ("megaphone_offers", "megadb"),
+                          ("megaphones_deleted", "megadb"), ("aliases", "aliasdb"), ("ocr_lines", "ocrdb")):
+        moved |= _move_table(con, table, schema)
+    if moved:
+        con.commit()
+        try:
+            con.execute("VACUUM main")       # give the space back
+        except sqlite3.Error:
+            pass
     cols = {r[1] for r in con.execute("PRAGMA table_info(listings)")}
     if con.execute("PRAGMA main.user_version").fetchone()[0] < 1 and "ts" in cols:
         # versions before 2610.1 saved local times without a zone: convert to UTC once
@@ -7854,10 +7902,24 @@ def apply_purge(con, what: str, field: str, start: str | None, end: str, when: s
     return n
 
 
-def purge_megaphones(con, hours: float) -> int:
-    """Delete megaphones older than `hours`."""
-    n = con.execute("DELETE FROM megaphones WHERE ts < ?", (utc_ago(hours=hours),)).rowcount
+_mega_archived = [-1e9]
+
+
+def purge_megaphones(con, hours: float, cfg: dict | None = None) -> int:
+    """Megaphones older than `hours`: deleted, archived first (at most every 10
+    minutes), or kept, as Settings → Data says (megaphones_retention)."""
     con.execute("DELETE FROM megaphones_deleted WHERE ts < ?", (utc_ago(hours=max(hours, 96)),))
+    mode = retention_of(cfg or {}, "megaphones")[0]
+    if mode == "keep":
+        con.commit()
+        return 0
+    if mode == "archive":
+        if time.monotonic() - _mega_archived[0] < 600:
+            con.commit()
+            return 0
+        _mega_archived[0] = time.monotonic()
+        return prune_kind(con, "megaphones", hours / 24, archive_dir(cfg or {}), vacuum=False)[0]
+    n = con.execute("DELETE FROM megaphones WHERE ts < ?", (utc_ago(hours=hours),)).rowcount
     con.execute("DELETE FROM megaphone_offers WHERE megaphone_id NOT IN (SELECT id FROM megaphones)")
     con.commit()
     return n
@@ -8354,7 +8416,7 @@ class MegaphoneWatch:
                     self.no_time = no_time
                     self.on_event("chat_hint", no_time)
                 n = save_megaphones(con, got) if got else 0
-                purge_megaphones(con, self.cfg.get("megaphone_hours", 72))
+                purge_megaphones(con, self.cfg.get("megaphone_hours", 72), self.cfg)
                 if got:
                     update_offers(con)        # items and prices in the new megaphones
             finally:
@@ -9234,6 +9296,111 @@ def prune_old(con, days: int, archive_to: Path | None = None) -> tuple[int, Path
     return n, path
 
 
+# Megaphones, aliases and OCR training pictures: each kept, archived or deleted on its
+# own (Settings → Data). An archive is a file per kind in the archive folder, added to
+# on every run, never overwritten.
+RETENTION_KINDS = {
+    #          schema     archive file                tables: (name, rows that are old, key)
+    "megaphones": ("megadb", "megaphones-archive.db", (
+        ("megaphones", "ts < ?", ("id", "ts")),
+        ("megaphone_offers", "megaphone_id IN (SELECT id FROM megadb.megaphones WHERE ts < ?)",
+         ("megaphone_id", "idx")))),
+    "aliases": ("aliasdb", "aliases-archive.db", (
+        # (not the app's own shorthand words: they'd only be added back)
+        ("aliases", "COALESCE(updated, added, '') < ? AND COALESCE(by, '') != 'app'", ("key", "updated")),)),
+    "ocr": ("ocrdb", "ocr-training-archive.db", (
+        ("ocr_lines", "ts < ?", ("id", "ts")),)),
+}
+RETENTION_DEFAULTS = {"megaphones": ("delete", None), "aliases": ("keep", 365), "ocr": ("keep", 60)}
+
+
+def retention_of(cfg: dict, kind: str) -> tuple[str, float]:
+    """(mode, keep in days) for megaphones, aliases or ocr: archive, delete or keep.
+    Megaphones are kept for "Keep megaphones for N hours" (megaphone_hours)."""
+    mode = cfg.get(f"{kind}_retention") or RETENTION_DEFAULTS[kind][0]
+    if kind == "megaphones":
+        days = float(cfg.get("megaphone_hours", 72) or 72) / 24
+    else:
+        try:
+            days = float(cfg.get(f"{kind}_keep_days") or RETENTION_DEFAULTS[kind][1])
+        except (TypeError, ValueError):
+            days = RETENTION_DEFAULTS[kind][1]
+    return (mode if mode in ("archive", "delete", "keep") else "keep"), max(1 / 24, days)
+
+
+def old_count(con, kind: str, days: float) -> int:
+    schema, _, tables = RETENTION_KINDS[kind]
+    name, where, _ = tables[0]
+    return con.execute(f"SELECT COUNT(*) FROM {schema}.{name} WHERE {where}",
+                       (utc_ago(hours=days * 24),)).fetchone()[0]
+
+
+def prune_kind(con, kind: str, days: float, archive_to: Path | None = None,
+               vacuum: bool = True) -> tuple[int, Path | None]:
+    """Remove megaphones / aliases / OCR training pictures older than `days`. With
+    `archive_to`, they're first copied into that folder's archive file for the kind
+    (deleted only once the copy is complete). Returns (rows removed, archive file)."""
+    schema, fname, tables = RETENTION_KINDS[kind]
+    cutoff = utc_ago(hours=days * 24)
+    n = old_count(con, kind, days)
+    if not n:
+        return 0, None
+    path = None
+    if archive_to is not None:
+        archive_to.mkdir(parents=True, exist_ok=True)
+        path = archive_to / fname
+        con.commit()
+        con.execute("ATTACH DATABASE ? AS arc", (str(path),))
+        try:
+            for name, where, key in tables:
+                cols = [r[1] for r in con.execute(f"PRAGMA {schema}.table_info({name})")]
+                con.execute(f"CREATE TABLE IF NOT EXISTS arc.{name} AS SELECT * FROM {schema}.{name} WHERE 0")
+                have = {r[1] for r in con.execute(f"PRAGMA arc.table_info({name})")}
+                for c in cols:
+                    if c not in have:
+                        con.execute(f"ALTER TABLE arc.{name} ADD COLUMN {c}")
+                collist = ", ".join(cols)
+                same = " AND ".join(f"a.{k} IS t.{k}" for k in key)
+                con.execute(f"INSERT INTO arc.{name} ({collist}) SELECT {collist} FROM {schema}.{name} t "
+                            f"WHERE {where} AND NOT EXISTS (SELECT 1 FROM arc.{name} a WHERE {same})", (cutoff,))
+            name, where, key = tables[0]
+            same = " AND ".join(f"a.{k} IS t.{k}" for k in key)
+            copied = con.execute(f"SELECT COUNT(*) FROM {schema}.{name} t WHERE {where} AND EXISTS "
+                                 f"(SELECT 1 FROM arc.{name} a WHERE {same})", (cutoff,)).fetchone()[0]
+            if copied != n:
+                con.rollback()
+                raise RuntimeError(f"only {copied} of {n} {kind} reached the archive; nothing deleted")
+            con.execute("CREATE TABLE IF NOT EXISTS arc.archive_log "
+                        "(archived_utc TEXT, rows INTEGER, older_than_utc TEXT, app_version TEXT)")
+            con.execute("INSERT INTO arc.archive_log VALUES (?,?,?,?)", (utc_now(), n, cutoff, VERSION))
+            con.commit()
+        finally:
+            con.execute("DETACH DATABASE arc")
+    for name, where, _ in reversed(tables):      # (offers first: they're found by their megaphone)
+        con.execute(f"DELETE FROM {schema}.{name} WHERE {where}", (cutoff,))
+    con.commit()
+    if vacuum:
+        try:
+            con.execute(f"VACUUM {schema}")
+        except sqlite3.Error:
+            pass
+    return n, path
+
+
+def apply_kind_retention(con, cfg: dict, kind: str) -> tuple[int, Path | None]:
+    mode, days = retention_of(cfg, kind)
+    if mode == "keep":
+        return 0, None
+    return prune_kind(con, kind, days, archive_dir(cfg) if mode == "archive" else None,
+                      vacuum=kind != "megaphones")
+
+
+def kind_size(kind: str) -> int:
+    """Bytes used by a kind's file (prices, megaphones, aliases, ocr)."""
+    p = DB_FILES[kind]
+    return sum(q.stat().st_size for q in (p, p.with_name(p.name + "-wal")) if q.exists())
+
+
 def apply_retention(con, cfg: dict) -> tuple[int, Path | None]:
     """The retention setting: archive-then-delete, delete, or keep everything."""
     mode = cfg.get("retention", "archive")
@@ -9251,11 +9418,16 @@ def clear_prices(con) -> Path:
     con.commit()
     con.backup(dst, name="main")
     dst.close()
+    mdst = sqlite3.connect(BACKUP_DIR / f"megaphones-{_stamp()}.db")
+    con.backup(mdst, name="megadb")
+    mdst.close()
     con.execute("DELETE FROM listings")
     con.execute("DELETE FROM reference")
     con.execute("DELETE FROM megaphones")
+    con.execute("DELETE FROM megaphone_offers")
     con.commit()
     con.execute("VACUUM main")
+    con.execute("VACUUM megadb")
     _Dictionary.cache = None
     best_match.memo = {}
     return backup
@@ -9559,7 +9731,7 @@ def main() -> None:
         out = stamped(a.file)
         print(f"Exported {export_maps(out):,} maps to {out}")
     elif a.cmd == "where":
-        print(f"data folder: {DATA}\n  prices:   {PRICES_DIR}  (listings + reference prices)\n"
+        print(f"data folder: {DATA}\n  prices:   {PRICES_DIR}  (prices.db: listings + reference prices; megaphones.db, aliases.db, ocr-training.db)\n"
               f"  settings: {SETTINGS_DIR}  (settings, capture areas, watched items and listings, ignore list, matches)\n"
               f"  cache:    {CACHE_DIR}  (item and map database, item icons)\n  backups:  {BACKUP_DIR}")
     if not CONFIG_PATH.exists():

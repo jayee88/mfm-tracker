@@ -25,6 +25,8 @@ records which account sent it and from which IP address.
                                       Times: 30m, 1h, 12h, 1d, 2w. --dry-run only counts.
                                       Connected apps delete the same from their own data.
                                       (ocr: the OCR line images; only on the server.)
+  mfm-server backup FOLDER            copy the database files (mfm-server.db, megaphones.db,
+                                      aliases.db, ocr-training.db) into FOLDER, while it runs
   mfm-server export-ocr FILE.zip [--fixed | --auto] [--last 7d] [--chat | --stores | --players]
                                       the OCR line images the apps sent, with their text,
                                       for training the app's OCR (fixed: checked by hand;
@@ -93,7 +95,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "2.7.0"
+VERSION = "2.8.0"
 UTC_FMT = "%Y-%m-%dT%H:%M:%SZ"
 MAX_BATCH = 500
 MAX_BODY = 2_000_000
@@ -112,7 +114,11 @@ def data_dir() -> Path:
     return p
 
 
-DB_PATH = data_dir() / "mfm-server.db"
+DB_PATH = data_dir() / "mfm-server.db"            # accounts, sightings, purges, the log
+# in files of their own, next to it (attached, so queries use their tables by name)
+EXTRA_DBS = (("megadb", data_dir() / "megaphones.db", ("megaphones",)),
+             ("aliasdb", data_dir() / "aliases.db", ("aliases",)),
+             ("ocrdb", data_dir() / "ocr-training.db", ("ocr_lines",)))
 _lock = threading.Lock()          # one writer at a time
 
 
@@ -127,6 +133,9 @@ def log(msg: str) -> None:
 def db() -> sqlite3.Connection:
     con = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
     con.execute("PRAGMA journal_mode=WAL")
+    for schema, path, _ in EXTRA_DBS:
+        con.execute(f"ATTACH DATABASE ? AS {schema}", (str(path),))
+        con.execute(f"PRAGMA {schema}.journal_mode=WAL")
     # 2.6.0: "nicknames" are called aliases now
     tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     if "nicknames" in tables and "aliases" not in tables:
@@ -172,7 +181,7 @@ def db() -> sqlite3.Connection:
             ts TEXT, user_id TEXT, username TEXT, ip TEXT, event TEXT, detail TEXT
         );
         CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
-        CREATE TABLE IF NOT EXISTS megaphones (
+        CREATE TABLE IF NOT EXISTS megadb.megaphones (
             uid TEXT PRIMARY KEY,
             seq INTEGER NOT NULL,
             ts TEXT NOT NULL,
@@ -183,9 +192,9 @@ def db() -> sqlite3.Connection:
             conf REAL NOT NULL DEFAULT 0,
             added_by TEXT, updated TEXT
         );
-        CREATE INDEX IF NOT EXISTS idx_mega_seq ON megaphones(seq);
-        CREATE INDEX IF NOT EXISTS idx_mega_ts ON megaphones(ts);
-        CREATE TABLE IF NOT EXISTS aliases (      -- what players call items in megaphones
+        CREATE INDEX IF NOT EXISTS megadb.idx_mega_seq ON megaphones(seq);
+        CREATE INDEX IF NOT EXISTS megadb.idx_mega_ts ON megaphones(ts);
+        CREATE TABLE IF NOT EXISTS aliasdb.aliases (      -- what players call items in megaphones
             key TEXT PRIMARY KEY,
             seq INTEGER NOT NULL,
             item TEXT NOT NULL DEFAULT '',          -- '' = "not an item"
@@ -194,8 +203,8 @@ def db() -> sqlite3.Connection:
             added_by TEXT, added_by_id TEXT, added_ip TEXT, added TEXT,
             updated_by TEXT, updated_by_id TEXT, updated_ip TEXT, stored TEXT
         );
-        CREATE INDEX IF NOT EXISTS idx_alias_seq ON aliases(seq);
-        CREATE TABLE IF NOT EXISTS ocr_lines (      -- chat line images for training the OCR
+        CREATE INDEX IF NOT EXISTS aliasdb.idx_alias_seq ON aliases(seq);
+        CREATE TABLE IF NOT EXISTS ocrdb.ocr_lines (      -- chat line images for training the OCR
             uid TEXT PRIMARY KEY,
             ts TEXT NOT NULL,                       -- when it was stored or last changed
             png BLOB NOT NULL,
@@ -215,15 +224,41 @@ def db() -> sqlite3.Connection:
         );
     """)
     # who sent each row: the account's id and name, and the IP it came from
-    for table, cols in (("sightings", ("added_by_id", "added_ip", "updated_by_id", "updated_ip")),
-                        ("megaphones", ("added_by_id", "added_ip", "updated_by", "updated_by_id", "updated_ip"))):
-        have = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
-        for c in cols:
-            if c not in have:
-                con.execute(f"ALTER TABLE {table} ADD COLUMN {c} TEXT")
-    if "kind" not in {r[1] for r in con.execute("PRAGMA table_info(ocr_lines)")}:
-        con.execute("ALTER TABLE ocr_lines ADD COLUMN kind TEXT NOT NULL DEFAULT 'chat'")
+    main_tables = {r[0] for r in con.execute("SELECT name FROM main.sqlite_master WHERE type = 'table'")}
+    for table, schemas, cols in (
+            ("sightings", ("main",), ("added_by_id", "added_ip", "updated_by_id", "updated_ip")),
+            ("megaphones", ("megadb", "main"), ("added_by_id", "added_ip", "updated_by", "updated_by_id",
+                                                "updated_ip"))):
+        for schema in schemas:
+            if schema == "main" and table not in main_tables:
+                continue
+            have = {r[1] for r in con.execute(f"PRAGMA {schema}.table_info({table})")}
+            for c in cols:
+                if c not in have:
+                    con.execute(f"ALTER TABLE {schema}.{table} ADD COLUMN {c} TEXT")
+    for schema in ("ocrdb", "main"):
+        if schema == "main" and "ocr_lines" not in main_tables:
+            continue
+        if "kind" not in {r[1] for r in con.execute(f"PRAGMA {schema}.table_info(ocr_lines)")}:
+            con.execute(f"ALTER TABLE {schema}.ocr_lines ADD COLUMN kind TEXT NOT NULL DEFAULT 'chat'")
+    # 2.8.0: megaphones, aliases and OCR training lines moved out of mfm-server.db into
+    # files of their own
+    moved = False
+    for schema, path, tables in EXTRA_DBS:
+        for table in tables:
+            if table not in main_tables:
+                continue
+            have = [r[1] for r in con.execute(f"PRAGMA main.table_info({table})")]
+            want = {r[1] for r in con.execute(f"PRAGMA {schema}.table_info({table})")}
+            cols = ", ".join(c for c in have if c in want)
+            con.execute(f"INSERT OR IGNORE INTO {schema}.{table} ({cols}) SELECT {cols} FROM main.{table}")
+            con.execute(f"DROP TABLE main.{table}")
+            con.commit()
+            log(f"moved {table} out of {DB_PATH.name} into {path.name}")
+            moved = True
     con.commit()
+    if moved:
+        con.execute("VACUUM main")
     return con
 
 
@@ -1186,6 +1221,19 @@ def main(argv: list[str]) -> int:
         n = export_ocr(con, args[0], status, since, kind)
         print(f"Wrote {n} line images with their text to {args[0]}.")
         return 0
+    if cmd == "backup":
+        if len(argv) < 3:
+            print("Usage: mfm-server backup FOLDER")
+            return 2
+        out = Path(argv[2])
+        out.mkdir(parents=True, exist_ok=True)
+        for schema, path in [("main", DB_PATH)] + [(s_, p) for s_, p, _ in EXTRA_DBS]:
+            dst = sqlite3.connect(out / path.name)
+            con.backup(dst, name=schema)       # a consistent copy, while the server runs
+            dst.close()
+            print(f"  {out / path.name}")
+        print(f"Backed up the {1 + len(EXTRA_DBS)} database files to {out}.")
+        return 0
     if cmd == "stats":
         n = con.execute("SELECT COUNT(*) FROM sightings").fetchone()[0]
         items = con.execute("SELECT COUNT(DISTINCT item) FROM sightings").fetchone()[0]
@@ -1195,8 +1243,9 @@ def main(argv: list[str]) -> int:
         by = dict(con.execute("SELECT kind, COUNT(*) FROM ocr_lines GROUP BY kind").fetchall())
         o = (f"{o} OCR line images ({by.get('chat', 0)} chat, {by.get('store', 0)} store names, "
              f"{by.get('player', 0)} player names)")
-        print(f"{n} sightings of {items} items, {m} megaphones, {k} aliases, {o}; "
-              f"{DB_PATH.stat().st_size / 1e6:.1f} MB")
+        print(f"{n} sightings of {items} items, {m} megaphones, {k} aliases, {o}")
+        for path in [DB_PATH] + [p for _, p, _ in EXTRA_DBS]:
+            print(f"  {path.name}: {path.stat().st_size / 1e6:.1f} MB" if path.exists() else f"  {path.name}: -")
         _table(con.execute("SELECT added_by, added_by_id, COUNT(*) FROM sightings GROUP BY added_by_id "
                            "ORDER BY 3 DESC").fetchall(), ("user", "id", "sightings"))
         return 0
