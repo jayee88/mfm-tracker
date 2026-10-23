@@ -6171,7 +6171,7 @@ class App:
             ("close_frames", "Empty frames = shop closed", 1, 20, 1),
             ("history_days", "Market median window (days)", 1, 90, 1),
             ("upscale", "OCR upscale factor", 1, 6, 1),
-            ("min_sightings", "Required sightings (different players)", 1, 100, 1),
+            ("min_sightings", "Required sightings (1 per player a day)", 1, 100, 1),
             ("deal_threshold_pct", "Flag DEAL / HIGH at ± %", 1, 90, 1),
             ("outlier_ceiling_pct", "Outliers: ceiling, % above median", 10, 10000, 10),
             ("outlier_floor_pct", "Outliers: floor, % below median", 5, 99, 5),
@@ -6195,8 +6195,8 @@ class App:
                          "About 20 KB each, a few per shop visit. 0 takes none.",
             "upscale": "Raise it if small text is misread. Higher is slower.",
             "min_sightings": "Sightings an item needs before it gets a market price, DEAL / HIGH "
-                             "and outliers. Each player counts once, however many of their "
-                             "listings were seen.",
+                             "and outliers. A player's listings posted within 24 hours count "
+                             "once (and as one price: their median); days apart, separately.",
             "outlier_ceiling_pct": "Prices this far above usual are left out of the market price.",
             "outlier_floor_pct": "Prices this far below usual are left out of the market price "
                                  "(still shown as deals).",

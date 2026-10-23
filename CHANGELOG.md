@@ -10,16 +10,13 @@
   includes them. They're a sure profit, so they're shown and ding even for ignored items.
 
 ### Changed
-- **Required sightings count players, not listings.** Each player counts once towards
-  the sightings an item needs before it gets a market price, DEAL / HIGH and outliers,
-  however many of their listings were seen: 6 sightings from 6 players plus 5 from one
-  more player count as 7. One seller can't set an item's price on their own. (A listing
-  with no player name read counts by its shop name.) The setting is now called
-  **Required sightings (different players)**.
-- **One player's listings count as one price.** When a player lists several of the same
-  item, the median of their prices counts once in the market price, the listed and sold
-  medians and the outlier limits, so one player listing 100 of an item doesn't set its
-  price. A sold median needs sales from 2 different players.
+- **One player's listings posted together count as one.** A player's listings of an item
+  posted within 24 hours of each other count once towards the sightings an item needs
+  (for a market price, DEAL / HIGH and outliers), and as one price (the median of theirs)
+  in the market price, the listed and sold medians and the outlier limits. So one player
+  listing 100 of an item at once can't set its price; the same player's listings days
+  apart count separately. (A listing with no player name read counts by its shop name.)
+  The setting is now called **Required sightings (1 per player a day)**.
 
 ## 2610.22.002 — 2026-10-22
 

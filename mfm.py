@@ -6314,18 +6314,44 @@ def similar(a: str, b: str) -> float:
 # average far enough to hide itself.
 
 # Who listed it: the player, or the shop's name when no player name was read, or the
-# listing itself when neither was. One player's listings count once (sighting_count),
-# and their prices as one: the median of them (per_player), so a player listing 100 of
-# an item doesn't set its price.
+# listing itself when neither was. One player's listings of an item posted within 24
+# hours of each other count once (sighting_count), and their prices as one: the median
+# of them (per_player), so a player listing 100 of an item at once doesn't set its
+# price. The same player's listings days apart count separately.
 _PLAYER_KEY = "COALESCE(NULLIF(LOWER(TRIM(seller)), ''), 'shop:' || NULLIF(LOWER(TRIM(shop)), ''), 'row:' || id)"
+SAME_POSTING = timedelta(hours=24)
+
+
+def _postings(rows) -> list[list[float]]:
+    """(player key, ts, price) rows -> the prices of each "posting": one player's
+    listings within 24 hours of the first of them; a later one starts the next."""
+    by: dict = {}
+    for key, ts, price in rows:
+        by.setdefault(key, []).append((ts or "", price))
+    out = []
+    for lst in by.values():
+        lst.sort()
+        start, group = None, []
+        for ts, price in lst:
+            try:
+                t = datetime.strptime(ts, UTC_FMT)
+            except ValueError:
+                t = None
+            if group and (t is None or start is None or t - start >= SAME_POSTING):
+                out.append(group)
+                group = []
+            if not group:
+                start = t
+            group.append(price)
+        if group:
+            out.append(group)
+    return out
 
 
 def per_player(rows) -> list[float]:
-    """(player key, price) rows -> one price per player: the median of theirs."""
-    by: dict = {}
-    for key, price in rows:
-        by.setdefault(key, []).append(price)
-    return [statistics.median(v) for v in by.values()]
+    """(player key, ts, price) rows -> one price per posting (see _postings): the
+    median of its prices."""
+    return [statistics.median(g) for g in _postings(rows)]
 
 
 def outlier_bounds(con, item: str, cfg: dict) -> tuple[float, float] | None:
@@ -6335,9 +6361,9 @@ def outlier_bounds(con, item: str, cfg: dict) -> tuple[float, float] | None:
         return None
     since = utc_ago(days=cfg["history_days"])
     rows = con.execute(
-        f"SELECT {_PLAYER_KEY}, price FROM listings WHERE item = ? AND COALESCE(last_seen, ts) >= ?",
+        f"SELECT {_PLAYER_KEY}, ts, price FROM listings WHERE item = ? AND COALESCE(last_seen, ts) >= ?",
         (item, since)).fetchall()
-    if len(rows) < 3 or sighting_count(con, item, since) < min_sightings(cfg):
+    if len(rows) < 3 or len(_postings(rows)) < min_sightings(cfg):
         return None
     med = statistics.median(per_player(rows))
     lo = med * max(0.0, 1 - float(cfg.get("outlier_floor_pct", 75)) / 100)
@@ -6351,19 +6377,19 @@ def is_outlier(each: float, bounds) -> bool:
 
 def price_stats(con, item: str, cfg: dict, bounds="auto") -> dict:
     """Per-unit medians of what's listed and what has sold, over the history
-    window, leaving out outliers. Each player's prices count as one (their median),
-    so the medians are over players; the _n counts are listings."""
+    window, leaving out outliers. A player's listings posted within a day count as
+    one price (their median, see _postings); the _n counts are listings."""
     if bounds == "auto":
         bounds = outlier_bounds(con, item, cfg)
     since = utc_ago(days=cfg["history_days"])
     listed, sold, out = [], [], 0
-    for key, price, is_sold in con.execute(
-            f"SELECT {_PLAYER_KEY}, price, COALESCE(sold, 0) FROM listings "
+    for key, ts, price, is_sold in con.execute(
+            f"SELECT {_PLAYER_KEY}, ts, price, COALESCE(sold, 0) FROM listings "
             "WHERE item = ? AND COALESCE(last_seen, ts) >= ?", (item, since)):
         if is_outlier(price, bounds):
             out += 1
             continue
-        (sold if is_sold else listed).append((key, price))
+        (sold if is_sold else listed).append((key, ts, price))
     listed_p, sold_p = per_player(listed), per_player(sold)
     return {
         "listed_median": int(statistics.median(listed_p)) if listed_p else None,
@@ -6378,12 +6404,12 @@ def price_stats(con, item: str, cfg: dict, bounds="auto") -> dict:
 
 def sighting_count(con, item: str, since: str) -> int:
     """Sightings of an item since `since` that count towards min_sightings: one per
-    player (the same player's listings, however many, count once), so one seller
-    can't set an item's price alone. A listing with no player name read counts by
-    its shop name, and one with neither counts on its own."""
-    return con.execute(
-        f"SELECT COUNT(DISTINCT {_PLAYER_KEY}) FROM listings WHERE item = ? AND COALESCE(last_seen, ts) >= ?",
-        (item, since)).fetchone()[0]
+    posting (a player's listings within 24 hours of each other count once, see
+    _postings), so one seller can't set an item's price alone. A listing with no
+    player name read counts by its shop name, and one with neither on its own."""
+    return len(_postings(con.execute(
+        f"SELECT {_PLAYER_KEY}, ts, price FROM listings WHERE item = ? AND COALESCE(last_seen, ts) >= ?",
+        (item, since)).fetchall()))
 
 
 def min_sightings(cfg: dict) -> int:
@@ -6410,19 +6436,19 @@ def market_rate(con, item: str, cfg: dict) -> tuple[int | None, str]:
     need = min_sightings(cfg)
     seen = sighting_count(con, item, utc_ago(days=cfg["history_days"]))
     if seen < need:
-        return None, f"not enough data ({seen} of {need} players)"
+        return None, f"not enough data ({seen} of {need} sightings)"
     bounds = outlier_bounds(con, item, cfg)
     st = price_stats(con, item, cfg, bounds)
     skipped = f", {st['outliers']} outlier{'s' if st['outliers'] != 1 else ''} ignored" if st["outliers"] else ""
     if st["sold_players"] >= 2:
-        return st["sold_median"], f"median of {st['sold_n']} sold by {st['sold_players']} players{skipped}"
+        return st["sold_median"], f"median of {st['sold_n']} sold (counted as {st['sold_players']}){skipped}"
     since = utc_ago(days=cfg["history_days"])
-    rows = [(k, p) for k, p in con.execute(
-        f"SELECT {_PLAYER_KEY}, price FROM listings WHERE item = ? AND COALESCE(last_seen, ts) >= ?",
+    rows = [(k, t, p) for k, t, p in con.execute(
+        f"SELECT {_PLAYER_KEY}, ts, price FROM listings WHERE item = ? AND COALESCE(last_seen, ts) >= ?",
         (item, since)) if not is_outlier(p, bounds)]
     unit = per_player(rows)
     if unit:
-        return int(statistics.median(unit)), f"median of {len(rows)} seen from {len(unit)} players{skipped}"
+        return int(statistics.median(unit)), f"median of {len(rows)} seen (counted as {len(unit)}){skipped}"
     return None, "not enough data"
 
 
