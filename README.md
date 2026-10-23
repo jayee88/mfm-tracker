@@ -340,7 +340,8 @@ An item's market price is:
 Your own sightings only count once an item has been seen from **5 different players** (Settings →
 **Required sightings (different players)**). Each player counts once, however many of
 their listings you've seen, so one seller can't set an item's price. Until then it shows
-no DEAL or HIGH.
+no DEAL or HIGH. In the medians, too, a player's listings of an item count as one: the
+median of their prices. Someone listing 100 of an item cheap counts like anyone else.
 
 **Outliers:** troll prices and misreads far from an item's usual price are left out of its
 market price. Very low ones still show as deals; very high ones show as **OUTLIER**. Adjust

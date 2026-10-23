@@ -16,6 +16,10 @@
   more player count as 7. One seller can't set an item's price on their own. (A listing
   with no player name read counts by its shop name.) The setting is now called
   **Required sightings (different players)**.
+- **One player's listings count as one price.** When a player lists several of the same
+  item, the median of their prices counts once in the market price, the listed and sold
+  medians and the outlier limits, so one player listing 100 of an item doesn't set its
+  price. A sold median needs sales from 2 different players.
 
 ## 2610.22.002 — 2026-10-22
 
