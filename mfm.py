@@ -1821,6 +1821,121 @@ def _price_match(ws: list[Word] | str):
     return None
 
 
+def _ink_runs(cols: list[bool]) -> list[tuple[int, int]]:
+    """[(x0, x1)] of the stretches of True, x1 exclusive."""
+    runs, start = [], None
+    for x, on in enumerate(cols + [False]):
+        if on and start is None:
+            start = x
+        elif not on and start is not None:
+            runs.append((start, x))
+            start = None
+    return runs
+
+
+# The game's price digits, each as an 8x12 grid: the average of a few hundred glyphs
+# cut from shop frames (the digit is 7x12 pixels at the game's own scale; a glyph is
+# shrunk or stretched to the grid, so a scaled game window reads the same).
+PRICE_DIGITS = {
+    "0": ("..####..", ".######.", "##....##", "##....##", "##....##", "##....##", "##....##", "##....##", "##....##", "##....##", ".######.", "..####.."),
+    "1": ("......##", "....####", "..######", "##....##", "......##", "......##", "......##", "......##", "......##", "......##", "......##", "......##"),
+    "2": ("..####..", ".######.", "#......#", ".......#", ".......#", "........", ".....##.", "....##..", "...##...", ".##.....", "#######.", "########"),
+    "3": ("..####..", ".######.", "#.....##", "......##", "......##", "...###..", "...####.", "......##", "......##", "#.....##", ".######.", "..####.."),
+    "4": (".....##.", "...####.", "...####.", "...####.", "..#..##.", ".##..##.", ".##..##.", "##...##.", "########", ".....##.", ".....##.", ".....##."),
+    "5": ("..######", "..######", ".##.....", "##......", "######..", "#######.", ".......#", ".......#", ".......#", "#......#", ".###.##.", "..####.."),
+    "6": ("..####..", ".######.", "##.....#", "##......", "##.###..", "####.##.", "###....#", "##.....#", "##.....#", "##.....#", ".######.", "..####.."),
+    "7": ("########", "########", ".....##.", ".....##.", "...##...", "...##...", "...##...", "...##...", ".##.....", ".##.....", ".##.....", ".##....."),
+    "8": ("..####..", ".######.", "##....##", "##....##", "##....##", ".######.", ".######.", "##....##", "##....##", "##....##", ".######.", "..####.."),
+    "9": ("..####..", ".######.", "##....##", "##....##", "##....##", "##....##", ".#..####", "..###.##", "......##", "#.....##", ".######.", "..####.."),
+}
+_PRICE_DIGIT_W, _PRICE_DIGIT_H = 8, 12
+
+
+def _digit_grid(ink, x0: int, x1: int) -> list[float] | None:
+    """The ink of columns x0..x1 (ink[x][y] booleans), trimmed to its rows and
+    scaled to the template grid: a list of 96 values 0..1."""
+    h = len(ink[0])
+    ys = [y for y in range(h) if any(ink[x][y] for x in range(x0, x1))]
+    if not ys or ys[-1] - ys[0] + 1 < 7:
+        return None
+    y0, y1 = ys[0], ys[-1] + 1
+    m = Image.new("L", (x1 - x0, y1 - y0))
+    mp = m.load()
+    for x in range(x0, x1):
+        for y in range(y0, y1):
+            mp[x - x0, y - y0] = 255 if ink[x][y] else 0
+    return [v / 255 for v in m.resize((_PRICE_DIGIT_W, _PRICE_DIGIT_H), Image.BOX).tobytes()]
+
+
+def _nearest_digit(grid: list[float]) -> tuple[str, float, float]:
+    """(digit, its distance, the runner-up's distance): mean absolute difference
+    between the glyph and each template, 0 identical, 1 opposite."""
+    scored = []
+    for d, rows in PRICE_DIGITS.items():
+        cells = [1.0 if c == "#" else 0.0 for row in rows for c in row]
+        scored.append((sum(abs(a - b) for a, b in zip(grid, cells)) / len(cells), d))
+    scored.sort()
+    return scored[0][1], scored[0][0], scored[1][0]
+
+
+def check_price_digits(img: Image.Image | None, words: list[Word], num: str) -> str:
+    """Tesseract reads a 9 in the game's price font as a 3 now and then (and the
+    other way round, or a 2 as a 9): at 7 pixels wide the digits differ in a few
+    pixels, and the LSTM doesn't always see them. The pixels settle it: each 3 or 9
+    in `num` ("9,000") is compared with the font's digits (PRICE_DIGITS) at its place
+    in `img` (the word's box from OCR, in `img`'s coordinates) and swapped for the
+    other when the glyph clearly matches it. Anything unclear (the word not found,
+    the glyphs not separable, too small, no contrast, no clear match) leaves `num`
+    as it was."""
+    if img is None or not any(c in "39" for c in num):
+        return num
+    want = num.replace(".", ",")
+    word = next((w for w in words
+                 if re.sub(r"[^\d,]", "", w.text.translate(_DIGIT_FIX).replace(".", ",")) == want), None)
+    if word is None or word.width < 3 or word.height < 5:
+        return num
+    # Tesseract's box can start a pixel or two inside the first digit (it's read at
+    # 3x and divided back), which cuts the left side of a 9's loop off and leaves a
+    # 3: so the crop takes a margin, and a run of ink touching its edge (a neighbour
+    # word's edge, "for" or "mesos" are 6+ pixels away) is dropped.
+    pad = 3
+    g = ImageOps.grayscale(img).crop((max(0, word.left - pad), max(0, word.top - 2),
+                                      min(img.width, word.left + word.width + pad),
+                                      min(img.height, word.top + word.height + 2)))
+    w, h = g.size
+    px = g.load()
+    lo, hi = g.getextrema()
+    if hi - lo < 60:
+        return num
+    thr = (lo + hi) / 2                    # ink is darker than the panel, faded text too
+    ink = [[px[x, y] < thr for y in range(h)] for x in range(w)]
+    runs = _ink_runs([any(col) for col in ink])
+    while len(runs) > len(want) and runs and runs[0][0] == 0:
+        runs = runs[1:]
+    while len(runs) > len(want) and runs and runs[-1][1] == w:
+        runs = runs[:-1]
+    if len(runs) != len(want):             # digits touching, or noise: not separable
+        return num
+    out = list(want)
+    for i, ch in enumerate(want):
+        if ch not in "39":
+            continue
+        grid = _digit_grid(ink, *runs[i])
+        if grid is None:
+            continue
+        digit, best, second = _nearest_digit(grid)
+        # Measured over 2,300 glyphs: a glyph within 0.18 of a template was always
+        # that digit (the runner-up is often close, 8 to a 9: hence the small
+        # margin), while every disagreement with Tesseract that was noise (a glyph
+        # cut by the scrollbar, a stack count) was 0.21 or more from everything.
+        # Only a 3 becomes a 9 or a 9 a 3: an 8 read as a 3 matched the 0 template
+        # a shade better than the 8 (they differ in one thin bar), and "0,888" is
+        # worse than "3,888".
+        if digit != ch and digit in "39" and best <= 0.18 and second - best >= 0.03:
+            out[i] = digit
+    return "".join(out) if "".join(out) != want else num
+
+
 def learn_geometry(lines: list[list[Word]], img_w: int, img_h: int,
                    img: Image.Image | None = None) -> dict | None:
     """Where the text column starts (x) and where the item list starts (y), from
@@ -1904,7 +2019,8 @@ def find_rows(lines: list[list[Word]], col_x: float, img: Image.Image | None = N
             gap = min(w.top for w in nxt) - min(w.top for w in ws)
             m = _price_match(nxt)
             if m and gap <= (ref_h or 12) * 2.6:
-                price_words, qty, price = nxt, qty_of(m), parse_price(m.group(2))
+                price_words, qty = nxt, qty_of(m)
+                price = parse_price(check_price_digits(img, nxt, m.group(2)))
                 used.add(i + 1)
             elif not m and gap <= (ref_h or 12) * 2.6:
                 price_words = nxt  # a price line we couldn't read: retry it
@@ -1950,7 +2066,7 @@ def reread_row(img: Image.Image, row: Row, col_x: int, cfg: dict):
                 if i > 0:
                     name = [Word(w.text, w.left + x0, w.top + y0, w.width, w.height, w.conf)
                             for w in lines[i - 1]]
-                return qty_of(m), parse_price(m.group(2)), name
+                return qty_of(m), parse_price(check_price_digits(box, ln, m.group(2))), name
     return None
 
 
@@ -2531,8 +2647,8 @@ def _read_slot(box, img, y, pitch, col_x, cfg, known) -> Listing | None:
                       for w in lines[i - 1] + ln]
                 icon = _icon_crop(img, Row(ws, None), col_x)
                 raw = _line_text(lines[i - 1]) + " / " + _line_text(ln) + " (slot re-read)"
-                return Listing(normalize_name(name, known), parse_price(m.group(2)), qty_of(m),
-                               raw, sold, icon)
+                return Listing(normalize_name(name, known), parse_price(check_price_digits(box, ln, m.group(2))),
+                               qty_of(m), raw, sold, icon)
     return None
 
 

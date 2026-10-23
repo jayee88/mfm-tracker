@@ -3,6 +3,13 @@
 ## 2610.22.002 — 2026-10-22
 
 ### Fixed
+- **A 9 in a price read as a 3** (9,000 logged as 3,000), now and then, and the other
+  way round. In the game's price font the digits are 7 pixels wide and a 3 and a 9
+  differ in a handful of pixels, which Tesseract doesn't always see. Every 3 and 9 in
+  a price is now compared with the font's ten digits (averaged from hundreds of real
+  prices) at its place in the frame, in all three reading passes (the list, a row's
+  re-read, a slot's re-read), and replaced by the digit it clearly matches. Faded
+  (sold) rows too. Anything unclear is left as read.
 - **Megaphones stopped being read.** A chat area drawn while the app was reading the whole
   screen was ignored once it read the game's window (and the other way round), so the chat
   wasn't found. An area drawn on a picture of the same size is used either way now, and
