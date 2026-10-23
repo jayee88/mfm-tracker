@@ -5651,7 +5651,9 @@ class _Dictionary:
         self.folded = {n: f for n, f, _, _ in self.fold_norm}   # name -> fold(_norm(name))
         self.memo: dict[str, str | None] = {}
         self.suggest_memo: dict[tuple, list[str]] = {}
-        best_match.memo = {}
+        import hashlib
+        self.key = hashlib.sha1("\n".join(names).encode("utf-8")).hexdigest()[:16]   # which list this is
+        best_match.memo = _load_review_memo(self.key)
         # graded scrolls, for deciding a cut-off scroll's grade by its icon colour
         self.graded_scrolls = [n for n in names if re.search(r"\bScroll: (Chaos|Greater|Intermediate|Lesser)$", n)]
         self.scroll_base_fold = {n: fold(_norm(n.rsplit(":", 1)[0])) for n in self.graded_scrolls}
@@ -6104,6 +6106,40 @@ def best_match(con, name: str) -> tuple[str | None, float]:
 
 
 best_match.memo = {}
+best_match.saved = 0          # how many answers the file holds
+REVIEW_MEMO_PATH = CACHE_DIR / "review_matches.json"
+
+
+def _load_review_memo(key: str) -> dict:
+    """best_match's answers from the last run, when the item list is the same one.
+    Working them out for every name takes half a minute on a big database, and the
+    window dragged while that ran in the background at every launch."""
+    best_match.saved = 0
+    try:
+        d = json.loads(REVIEW_MEMO_PATH.read_text(encoding="utf-8"))
+        if d.get("key") != key:
+            return {}
+        memo = {n: (p, float(s)) for n, (p, s) in d["memo"].items()}
+    except (OSError, ValueError, TypeError, KeyError):
+        return {}
+    best_match.saved = len(memo)
+    return memo
+
+
+def save_review_memo() -> None:
+    """Keep best_match's answers for the next run. Truncated scroll names are left
+    out: their answer comes from the stored icon, which can arrive later."""
+    d = _Dictionary.cache
+    if d is None or len(best_match.memo) == best_match.saved:
+        return
+    memo = {n: [p, s] for n, (p, s) in best_match.memo.items()
+            if not (n.endswith("\u2026") or looks_like_partial_scroll(n))}
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        REVIEW_MEMO_PATH.write_text(json.dumps({"key": d.key, "memo": memo}), encoding="utf-8")
+        best_match.saved = len(best_match.memo)
+    except OSError:
+        pass
 
 
 def unmatched_items(con, include_kept: bool = False) -> list[dict]:
@@ -6128,6 +6164,7 @@ def unmatched_items(con, include_kept: bool = False) -> list[dict]:
                     "raw": (raw or "").replace(" (slot re-read)", ""), "suggest": pick,
                     "score": score, "kept": item in kept, "price": price, "qty": qty or 1,
                     "shop": shop or "", "seller": seller or "", "channel": channel or ""})
+    save_review_memo()
     out.sort(key=lambda r: (r["kept"], -r["count"], r["item"].lower()))
     return out
 

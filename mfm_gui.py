@@ -2163,7 +2163,10 @@ class App:
         except (tk.TclError, ValueError):
             hours = 24
         want = {"hours": hours, "show_sold": bool(self.show_sold.get()), "cfg": dict(self.cfg),
-                "show_kept": bool(hasattr(self, "review_show_kept") and self.review_show_kept.get())}
+                "show_kept": bool(hasattr(self, "review_show_kept") and self.review_show_kept.get()),
+                # My Inventory's stats come with the data (see refresh_inventory)
+                "inventory": sorted({r["item"] for r in mfm.load_inventory(self.inv_con)})
+                if hasattr(self, "inv_con") else []}
         with self._tables_lock:
             self._tables_want = want
             if self._tables_busy:
@@ -2173,6 +2176,7 @@ class App:
 
     def _tables_work(self):
         con = None
+        last = None     # (what was asked, the database's version, when) of the last answer
         while True:
             with self._tables_lock:
                 want, self._tables_want = self._tables_want, None
@@ -2182,9 +2186,22 @@ class App:
             try:
                 if con is None:
                     con = mfm.db()
+                # Asked every 5 seconds (periodic_refresh). The same question, nothing
+                # written to the database since (by any connection: PRAGMA data_version)
+                # and the last answer under a minute old (listings do age out of the
+                # window) has the same answer: skip the seconds of queries, which kept
+                # this thread busy, and the window slow, with nothing new to show.
+                version = con.execute("PRAGMA data_version").fetchone()[0]
+                if last and last[0] == want and last[1] == version and time.monotonic() - last[2] < 60:
+                    continue
                 data = mfm.table_data(con, want["cfg"], hours=want["hours"],
                                       show_sold=want["show_sold"], show_kept=want["show_kept"],
                                       review=bool(want["cfg"].get("review_on", True)))
+                data["inventory"] = {}
+                for item in want.get("inventory") or ():
+                    mfm.ui_pause()
+                    data["inventory"][item] = mfm.inventory_stats(con, item, want["cfg"])
+                last = (want, version, time.monotonic())
             except Exception as e:
                 self.events.put(("tables_error", f"{type(e).__name__}: {e}"))
                 continue
@@ -2194,6 +2211,7 @@ class App:
         if data == self._tables_data:
             return        # nothing changed since the last fill: leave the tables alone
         self._tables_data = data
+        self.refresh_inventory()      # its stats came with the data
         self.refill_tables()
 
     def on_tables_error(self, msg):
@@ -3489,11 +3507,20 @@ class App:
         t.delete(*t.get_children())
         lo = hi = mkt = sales = listed = profit = 0
         missing = owned_n = 0
-        stats = {}
+        # The stats are worked out by the tables thread (request_tables) and come with
+        # the Deals and Items data: eight queries an item, done here on a big database,
+        # froze the window for a second every refresh (twenty while the item names
+        # were being matched for Review at launch). Until the first data arrives the
+        # rows show "-"; after that an item not in it yet (just added) is done here, once.
+        data = getattr(self, "_tables_data", None)
+        stats = dict((data or {}).get("inventory") or {})
+        pending = {"market": None, "low": None, "high": None, "points": "", "sold24": "",
+                   "last3": None, "last3_n": 0}
         rows = mfm.load_inventory(self.inv_con)
         for r in rows:
             item, qty = r["item"], int(r["qty"] or 1)
-            st = stats.get(item) or stats.setdefault(item, mfm.inventory_stats(self.con, item, self.cfg))
+            st = stats.get(item) or stats.setdefault(
+                item, mfm.inventory_stats(self.con, item, self.cfg) if data is not None else pending)
             lp = r["list_price"]
             if r["sold"]:
                 profit += (lp or 0) * qty
@@ -3508,7 +3535,7 @@ class App:
                     sales += st["last3"] * qty
                 if lp:
                     listed += lp * qty
-                if st["low"] is None and not st["market"]:
+                if st["low"] is None and not st["market"] and st is not pending:
                     missing += 1
             rng = (f"{mfm.fmt(st['low'])} – {mfm.fmt(st['high'])}" if st["low"] is not None
                    and st["low"] != st["high"] else mfm.fmt(st["low"]))

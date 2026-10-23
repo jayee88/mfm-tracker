@@ -3,6 +3,18 @@
 ## 2610.22.002 — 2026-10-22
 
 ### Fixed
+- **The window froze for seconds at launch and stalled every few seconds after.** With
+  a big database (180,000 listings) and items in My Inventory, three things added up:
+  My Inventory's stats (eight queries an item) were worked out on the window's own thread
+  at every 5-second refresh, so each one froze the window for about a second, and for
+  fifteen at launch while the Review suggestions were being matched in the background;
+  those suggestions (half a minute of name matching) were worked out again at every
+  launch; and the Deals / Items / Review data (seconds of queries) was recomputed every
+  5 seconds whether or not anything had been written to the database, keeping the
+  background busy and the window slow. Now the inventory stats come with the table data
+  from the background thread, the Review suggestions are kept in cache/review_matches.json
+  for the next launch (as long as the item list is the same), and the table data is only
+  recomputed when the database changed, the question changed, or a minute has passed.
 - **Megaphones stopped being read.** A chat area drawn while the app was reading the whole
   screen was ignored once it read the game's window (and the other way round), so the chat
   wasn't found. An area drawn on a picture of the same size is used either way now, and
