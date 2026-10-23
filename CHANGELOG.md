@@ -7,7 +7,7 @@
   A listing cheaper than that is shown in a darker green than a deal and dings (the
   alert sound, without bringing the window to the front). Turn the ding off in the
   Watched tab (**Ding for listings under the NPC sell price**). **Deals only** in Deals
-  includes them.
+  includes them. They're a sure profit, so they're shown and ding even for ignored items.
 
 ## 2610.22.002 — 2026-10-22
 

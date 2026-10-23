@@ -1836,10 +1836,12 @@ class App:
         ign = s.item in self.ignored
         found = bool(hit) or (bool(wl) and not s.sold)
         npc = npc_sell_price(s.item)
-        under_npc = bool(npc) and not s.sold and not ign and s.each < npc
+        # under the NPC sell price: guaranteed profit, so shown (and dinged) even for
+        # an ignored item
+        under_npc = bool(npc) and not s.sold and s.each < npc
         iid = self.live.insert("", "end", image=self.icon_for(s.item, found=found),
-                         tags=(("ignored",) if ign and verdict != "SOLD" else
-                               ("npc",) if under_npc else (tag_for(verdict),))
+                         tags=(("npc",) if under_npc else
+                               ("ignored",) if ign and verdict != "SOLD" else (tag_for(verdict),))
                          + (("watch",) if found else ()), values=(
             s.item, mfm.fmt(s.each), mfm.fmt(s.market), mfm.fmt(npc) if npc else "",
             diff_text(s.pct), verdict, s.notes,
@@ -2289,7 +2291,7 @@ class App:
         rows = [r for r in scored
                 if (show_outliers or r[6] != "OUTLIER")
                 and not (only_deals and ((r[6] != "DEAL" and not below_npc(r[2], r[4])) or r[0]))
-                and (show_ignored or r[2] not in self.ignored)]
+                and (show_ignored or r[2] not in self.ignored or (not r[0] and below_npc(r[2], r[4])))]
         if self.deals_watched_only.get():
             # sold, pct, item, qty, each, mkt, v, where, ts, price, shop, seller, notes
             rows = [r for r in rows if not r[0] and (
@@ -2310,8 +2312,8 @@ class App:
                 if item not in npcs:
                     npcs[item] = npc_sell_price(item)
                 npc = npcs[item]
-                tag = "sold" if sold else ("ignored" if item in self.ignored else
-                                           "npc" if npc and each < npc else tag_for(v))
+                tag = "sold" if sold else ("npc" if npc and each < npc else
+                                           "ignored" if item in self.ignored else tag_for(v))
                 iid = self.deals.insert("", "end", image=self.icon_for(item, found=found),
                                         tags=(tag,) + (("watch",) if found else ()), values=(
                     item, mfm.fmt(each), mfm.fmt(mkt), mfm.fmt(npc) if npc else "",
@@ -4975,12 +4977,13 @@ class App:
         for k in self.live.get_children():   # re-tag the current shop's rows
             if self.live.set(k, "item") in items:
                 tags = [t for t in self.live.item(k, "tags") if t not in ("ignored", "deal", "high", "unknown", "npc")]
-                if on and "sold" not in tags:
+                each = mfm.parse_price(self.live.set(k, "each") or "") if self.live.set(k, "each") else None
+                if "sold" not in tags and below_npc(self.live.set(k, "item"), each):
+                    tags.append("npc")        # (guaranteed profit: ignored or not)
+                elif on and "sold" not in tags:
                     tags.append("ignored")
                 elif not on:
-                    each = mfm.parse_price(self.live.set(k, "each") or "") if self.live.set(k, "each") else None
-                    tags.append("npc" if "sold" not in tags and below_npc(self.live.set(k, "item"), each)
-                                else tag_for(self.live.set(k, "verdict")))
+                    tags.append(tag_for(self.live.set(k, "verdict")))
                 self.live.item(k, tags=tags)
         self.refresh_tables()
         what = f"'{items[0]}'" if len(items) == 1 else f"{len(items)} items"
