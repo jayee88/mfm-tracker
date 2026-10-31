@@ -43,9 +43,6 @@
 ## 2610.22.002 — 2026-10-22
 
 ### Fixed
-- **Sorting a table by a column didn't last:** the next refresh (every 5 seconds while
-  monitoring) put the rows back in the default order. The column you sorted by, and
-  its direction, are kept now and applied again after every refill, in every table.
 - **Megaphones stopped being read.** A chat area drawn while the app was reading the whole
   screen was ignored once it read the game's window (and the other way round), so the chat
   wasn't found. An area drawn on a picture of the same size is used either way now, and
