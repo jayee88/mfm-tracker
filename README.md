@@ -159,7 +159,10 @@ the game runs in a window (or borderless), not in exclusive full screen.
   price (what an NPC pays for the item, shown in its own column here and in Deals), with
   a ding, even for ignored items (it's a sure profit).
 - **Deals:** listings still for sale, best deals first. Tick **Include sold** to see sold
-  ones, or **Watched items** to see only watched items and listings.
+  ones, **Watched items** to see only watched items and listings, or **NPC resale** to see
+  only listings cheaper than what an NPC pays (biggest **NPC profit** first). Select a
+  listing you bought and click **Bought** (or right-click → Bought this listing): it's
+  marked sold and leaves Deals.
 - **Items:** every item you've seen: the cheapest listing still for sale and where it is,
   listed and sold prices, market price, the median prices in selling and buying
   megaphones, and the NPC buy / sell prices. Filter by name,

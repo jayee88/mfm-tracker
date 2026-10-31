@@ -89,7 +89,7 @@ def data_dir() -> Path:
 
 
 # Shown to you: YYMM.minor.hotfix. The codename is for development notes only.
-VERSION = "2610.23.003"
+VERSION = "2610.31.001"
 CODENAME = "npcprices"
 
 DATA = data_dir()
@@ -7034,6 +7034,19 @@ def forget_item(con, item: str, scope: dict | None = None) -> int:
     n = con.execute(f"DELETE FROM listings WHERE item = ?{extra}", [item] + args).rowcount
     if not con.execute("SELECT 1 FROM listings WHERE item = ?", (item,)).fetchone():
         con.execute("DELETE FROM icons WHERE item = ?", (item,))
+    con.commit()
+    return n
+
+
+def bought_listing(con, item: str, scope: dict | None = None) -> int:
+    """You bought a listing (a deal, or one to sell on to an NPC): it's marked sold
+    now, the way a listing that faded from its shop is, so it leaves Deals and counts
+    as a sale at its price. With `scope`, just that shop's listing. Returns how many
+    rows were marked. (From GabrielGarciaRivas's #6.)"""
+    extra, args = _scope_sql(scope)
+    now = utc_now()
+    n = con.execute(f"UPDATE listings SET sold = 1, sold_ts = ?, last_seen = ? "
+                    f"WHERE item = ? AND COALESCE(sold, 0) = 0{extra}", [now, now, item] + args).rowcount
     con.commit()
     return n
 

@@ -1,5 +1,30 @@
 # Changelog
 
+## 2610.31.001 — 2026-10-31
+
+### New
+- **Deals → NPC resale:** shows only listings priced under what an NPC pays for the item
+  (ignored items too), biggest NPC profit first, whatever the market says. A new **NPC
+  profit** column beside NPC sell says what selling one to an NPC makes (negative when it
+  costs more). (Thanks, GabrielGarciaRivas.)
+- **Bought:** a button in Deals, and **Bought this listing** in the right-click menu of
+  Deals and Live: the listing is marked sold, so it leaves Deals and counts as a sale at
+  that price. Include sold shows it again; nothing is deleted. (Thanks,
+  GabrielGarciaRivas.)
+
+### Fixed
+- **The window froze for 15–20 seconds after launch and stalled every few seconds on a
+  big database.** My Inventory's numbers are worked out in the background with the
+  other tables; the Review suggestions are kept between runs (`cache/review_matches.json`)
+  instead of being worked out again at every launch; and the tables aren't recomputed
+  when nothing changed. (Thanks, GabrielGarciaRivas.)
+- **A 9 in a price read as a 3** (9,000 logged as 3,000), and the other way round. Every 3
+  and 9 in a price is compared with the game font's digits and swapped when it clearly
+  is the other one. Anything unclear is left as read. (Thanks, GabrielGarciaRivas.)
+- **Sorting a table by a column didn't last:** the next refresh put the rows back in the
+  default order. The column you sorted by is kept in every table, and sorting a big table
+  takes under a second instead of minutes. (Thanks, GabrielGarciaRivas.)
+
 ## 2610.23.003 — 2026-10-23
 
 ### Changed

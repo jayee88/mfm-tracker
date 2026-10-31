@@ -134,6 +134,7 @@ HEAD = {"item": "Item", "each": "Price", "market": "Market",
         "status": "Status", "listed_med": "Listed med.", "sold_med": "Sold med.",
         "listed_n": "Listed", "sold_n": "Sold", "total": "Bundle price",
         "max_each": "Max price", "last_price": "Last price", "npc_buy": "NPC buy", "npc_sell": "NPC sell",
+        "npc_profit": "NPC profit",
         "saved": "Saved", "notes": "Notes", "qty": "Qty", "range": "Price range",
         "points": "Data points", "sold24": "Sold 24h", "last3": "Avg last 3 sales", "tab": "Tab",
         "match": "Match / suggestion", "list_price": "List price", "message": "Message",
@@ -145,13 +146,13 @@ WIDTH = {"item": 155, "each": 82, "market": 82, "diff": 52, "verdict": 62,
          "best_shop": 140, "best_player": 100, "best_map": 265, "best_channel": 72,
          "time": 126, "low": 95, "high": 95, "seen": 50, "source": 110,
          "best": 90, "best_where": 230, "status": 66, "listed_med": 95, "sold_med": 90,
-         "listed_n": 60, "sold_n": 45, "total": 100, "max_each": 110, "last_price": 100, "npc_buy": 85, "npc_sell": 85,
+         "listed_n": 60, "sold_n": 45, "total": 100, "max_each": 110, "last_price": 100, "npc_buy": 85, "npc_sell": 85, "npc_profit": 90,
          "saved": 110, "notes": 170, "qty": 55, "range": 170, "points": 90, "sold24": 75,
          "last3": 130, "tab": 70, "match": 230, "list_price": 95, "message": 600,
          "side": 120, "phrase": 220, "mprice": 95, "msell": 140, "mbuy": 135, "aterm": 240, "avalue": 300, "atype": 90, "suggest": 260, "score": 60, "count": 65, "raw": 300}
 NUMERIC = {"each", "market", "diff", "low", "high", "seen", "best", "listed_med",
            "sold_med", "listed_n", "sold_n", "total", "score", "count", "channel", "best_channel",
-           "max_each", "last_price", "npc_buy", "npc_sell", "qty", "range", "points", "sold24", "last3", "list_price",
+           "max_each", "last_price", "npc_buy", "npc_sell", "npc_profit", "qty", "range", "points", "sold24", "last3", "list_price",
            "mprice", "msell", "mbuy"}
 CENTER = {"channel", "best_channel"}
 
@@ -1291,8 +1292,19 @@ class App:
         ttk.Spinbox(top, from_=1, to=720, width=5, textvariable=self.hours_var,
                     command=self.refresh_tables).pack(side="left", padx=4)
         ttk.Label(top, text="hours, best deals first.").pack(side="left")
+        b = ttk.Button(top, text="Bought", command=lambda: self.bought_listing(self.deals))
+        b.pack(side="left", padx=(12, 0))
+        tip("You bought the selected listings (to use, or to sell on to an NPC): they're marked "
+            "sold, so they leave Deals and count as sales at that price. Include sold shows them "
+            "again. Also in the right-click menu.", b)
         # "Include sold" and the hours change what's queried; the other three only
         # filter the rows already computed, so they apply at once
+        self.deals_npc_resale = tk.BooleanVar(value=False)
+        cb = ttk.Checkbutton(top, text="NPC resale", variable=self.deals_npc_resale,
+                             command=self.refill_tables)
+        cb.pack(side="right", padx=(10, 0))
+        tip("Shows only listings priced under what an NPC pays for the item (ignored items too), "
+            "biggest NPC profit first, whatever the market says.", cb)
         self.deals_watched_only = tk.BooleanVar(value=False)
         cb = ttk.Checkbutton(top, text="Watched items", variable=self.deals_watched_only,
                              command=self.refill_tables)
@@ -1310,7 +1322,9 @@ class App:
         self.show_outliers = tk.BooleanVar(value=False)
         ttk.Checkbutton(top, text="Show outliers", variable=self.show_outliers,
                         command=self.refill_tables).pack(side="right", padx=10)
-        self.deals = make_tree(deals, COLS + ("status", "notes", "shop", "player", "map", "channel", "time"))
+        # NPC profit beside NPC sell: what selling it to an NPC makes (negative: it costs more)
+        self.deals = make_tree(deals, COLS[:4] + ("npc_profit",) + COLS[4:]
+                               + ("status", "notes", "shop", "player", "map", "channel", "time"))
         self.deals.frame.pack(fill="both", expand=True)
         self.deals.bind("<Double-1>", lambda e: self.open_history(self.deals))
 
@@ -2240,7 +2254,10 @@ class App:
                 # and the last answer under a minute old (listings do age out of the
                 # window) has the same answer: skip the seconds of queries, which kept
                 # this thread busy, and the window slow, with nothing new to show.
-                version = con.execute("PRAGMA data_version").fetchone()[0]
+                # (each file on its own: prices, and megaphones for the Items tab's
+                # megaphone prices)
+                version = tuple(con.execute(f"PRAGMA {sch}.data_version").fetchone()[0]
+                                for sch in ("main", "megadb", "aliasdb"))
                 if last and last[0] == want and last[1] == version and time.monotonic() - last[2] < 60:
                     continue
                 data = mfm.table_data(con, want["cfg"], hours=want["hours"],
@@ -2321,10 +2338,15 @@ class App:
         restore = self._keep_selection(self.deals, row_key)
         show_outliers, only_deals, show_ignored = (self.show_outliers.get(), self.only_deals.get(),
                                                    self.show_ignored.get())
+        npc_resale = self.deals_npc_resale.get()
         rows = [r for r in scored
-                if (show_outliers or r[6] != "OUTLIER")
-                and not (only_deals and ((r[6] != "DEAL" and not below_npc(r[2], r[4])) or r[0]))
+                if (show_outliers or r[6] != "OUTLIER" or npc_resale)
+                and not (only_deals and not npc_resale and ((r[6] != "DEAL" and not below_npc(r[2], r[4])) or r[0]))
                 and (show_ignored or r[2] not in self.ignored or (not r[0] and below_npc(r[2], r[4])))]
+        if npc_resale:
+            # an NPC pays more than the shop asks: a sure profit, biggest first
+            rows = [r for r in rows if not r[0] and below_npc(r[2], r[4])]
+            rows.sort(key=lambda r: r[4] - npc_sell_price(r[2]))
         if self.deals_watched_only.get():
             # sold, pct, item, qty, each, mkt, v, where, ts, price, shop, seller, notes
             rows = [r for r in rows if not r[0] and (
@@ -2350,6 +2372,7 @@ class App:
                 iid = self.deals.insert("", "end", image=self.icon_for(item, found=found),
                                         tags=(tag,) + (("watch",) if found else ()), values=(
                     item, mfm.fmt(each), mfm.fmt(mkt), mfm.fmt(npc) if npc else "",
+                    mfm.fmt(npc - each) if npc else "",
                     diff_text(None if pct == 999 else pct),
                     v, "sold" if sold else "for sale", notes, *where, mfm.local_time(ts)))
                 self.scopes[(tree_id, iid)] = {"price": price, "qty": qty, "shop": shop, "seller": seller,
@@ -5110,6 +5133,8 @@ class App:
             if tree is self.items:
                 menu.add_command(label=f"Delete all listings of {n_items}", command=self.forget_selected)
             else:
+                menu.add_command(label="Bought this listing" if one else f"Bought these {len(rows)} listings",
+                                 command=lambda: self.bought_listing(tree))
                 menu.add_command(label="Delete this listing (bad read)" if one
                                  else f"Delete {len(rows)} listings (bad reads)",
                                  command=lambda: self.delete_listing(tree))
@@ -5243,6 +5268,24 @@ class App:
         self.refresh_tables()
         self._set_status(f"Deleted {n} listing{'s' if n != 1 else ''}"
                          + (f" of '{rows[0][1]}'." if len(rows) == 1 else "."))
+
+    def bought_listing(self, tree):
+        """The selected listings were bought (to use, or to sell on): marked sold, so they
+        leave Deals and count as sales at that price. Nothing is deleted."""
+        rows = [(k, tree.set(k, "item"), self.scopes.get((str(tree), k))) for k in tree.selection()]
+        rows = [r for r in rows if r[2]]
+        if not rows:
+            self._set_status("Select the listing you bought first.")
+            return
+        n = sum(mfm.bought_listing(self.con, item, scope) for _, item, scope in rows)
+        if tree is self.live:
+            for k, _, _ in rows:
+                self.live.item(k, tags=("sold",))
+                self.live.set(k, "verdict", "SOLD")
+        self.refresh_tables()
+        self._set_status(f"Marked {mfm.plural(n, 'listing')} as bought"
+                         + (f": '{rows[0][1]}' at {mfm.fmt(rows[0][2]['price'])}." if len(rows) == 1 else ".")
+                         + " Include sold in Deals shows them.")
 
     def open_meowdb(self, tree):
         import webbrowser
