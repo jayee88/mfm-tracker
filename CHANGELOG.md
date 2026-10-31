@@ -1,5 +1,12 @@
 # Changelog
 
+## 2610.31.002 — 2026-10-31
+
+### Fixed
+- "Updating the tables failed: RuntimeError: dictionary changed size during iteration".
+  Saving the Review tab's matches for the next launch went through them while the shop
+  reading was adding new ones. It now saves a copy.
+
 ## 2610.31.001 — 2026-10-31
 
 ### New

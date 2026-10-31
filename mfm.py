@@ -89,7 +89,7 @@ def data_dir() -> Path:
 
 
 # Shown to you: YYMM.minor.hotfix. The codename is for development notes only.
-VERSION = "2610.31.001"
+VERSION = "2610.31.002"
 CODENAME = "npcprices"
 
 DATA = data_dir()
@@ -6379,12 +6379,15 @@ def save_review_memo() -> None:
     d = _Dictionary.cache
     if d is None or len(best_match.memo) == best_match.saved:
         return
-    memo = {n: [p, s] for n, (p, s) in best_match.memo.items()
+    # a copy first: the monitor's thread adds to the memo while this one goes through
+    # it ("dictionary changed size during iteration"); dict() copies it in one step
+    snapshot = dict(best_match.memo)
+    memo = {n: [p, s] for n, (p, s) in snapshot.items()
             if not (n.endswith("\u2026") or looks_like_partial_scroll(n))}
     try:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         REVIEW_MEMO_PATH.write_text(json.dumps({"key": d.key, "memo": memo}), encoding="utf-8")
-        best_match.saved = len(best_match.memo)
+        best_match.saved = len(snapshot)
     except OSError:
         pass
 
