@@ -610,6 +610,32 @@ def grab_full_screen() -> Image.Image:
 _GRAB_FAILED: dict = {}   # Wayland screenshot tools: failures in a row here
 
 
+# Windows that are never the game, even with "MapleStory" in their title: a browser on a
+# MapleStory page or video, Discord, OBS, this app. Matched on the window's title and on
+# the program it belongs to (its class / owner).
+_NOT_GAME = re.compile(
+    r"\b(firefox|mozilla|librewolf|waterfox|zen browser|chrome|chromium|google chrome|brave|"
+    r"microsoft edge|msedge|opera|vivaldi|safari|epiphany|falkon|konqueror|qutebrowser|"
+    r"discord|vesktop|obs|steam|youtube|twitch|reddit|free market tracker|mfm-tracker)\b",
+    re.I)
+
+
+def game_window_rank(wanted: str, title: str, owner: str = "") -> int:
+    """How well a window fits the game's title (Settings → Reading → Window title):
+    3 the title is exactly it ("MapleStory"), 2 it with a little more ("MapleStory (1)"),
+    1 it somewhere in a longer title, 0 not the game (no match, or a browser or other
+    program that has it in its title)."""
+    w = " ".join((wanted or "").lower().split())
+    t = " ".join((title or "").lower().split())
+    if not w or w not in t or _NOT_GAME.search(t) or (owner and _NOT_GAME.search(owner)):
+        return 0
+    if t == w:
+        return 3
+    if t.startswith(w) and len(t) <= len(w) + 12:
+        return 2
+    return 1
+
+
 class _XWindowGrab:
     """Copies the game's window from XWayland (libX11 + libXcomposite through ctypes):
     the window is found by its title (MapleStory, or "game_window_title" in settings),
@@ -693,6 +719,7 @@ class _XWindowGrab:
         self.XImage, self.XWindowAttributes, self.win_t = XImage, XWindowAttributes, win_t
         self.root = x.XDefaultRootWindow(dpy)
         self.net_name = x.XInternAtom(dpy, b"_NET_WM_NAME", 0)
+        self.wm_class = x.XInternAtom(dpy, b"WM_CLASS", 0)
         self.utf8 = x.XInternAtom(dpy, b"UTF8_STRING", 0)
         return True
 
@@ -712,6 +739,17 @@ class _XWindowGrab:
             return s
         return ""
 
+    def _class(self, w) -> str:
+        """The window's WM_CLASS ("maplestory.exe", "firefox"), as one string."""
+        c, x = self.c, self.x
+        t, fmt, n, after, data = c.c_ulong(), c.c_int(), c.c_ulong(), c.c_ulong(), c.c_void_p()
+        if x.XGetWindowProperty(self.dpy, w, self.wm_class, 0, 256, 0, 31, c.byref(t), c.byref(fmt),
+                                c.byref(n), c.byref(after), c.byref(data)) == 0 and data.value:
+            s_ = c.string_at(data.value, n.value).decode("latin-1", "replace").replace("\0", " ")
+            x.XFree(data)
+            return s_
+        return ""
+
     def _attrs(self, w):
         a = self.XWindowAttributes()
         if not self.x.XGetWindowAttributes(self.dpy, w, self.c.byref(a)):
@@ -719,9 +757,10 @@ class _XWindowGrab:
         return a
 
     def _find(self, title: str):
-        """The biggest mapped window whose title has `title` in it."""
+        """The game's window: the one whose title fits `title` best (see
+        game_window_rank: exactly it first, never a browser), the biggest of those."""
         c, x = self.c, self.x
-        best, best_area = None, 0
+        best, best_key = None, (0, 0)
         stack = [self.root]
         seen = 0
         while stack and seen < 5000:
@@ -734,9 +773,13 @@ class _XWindowGrab:
                     x.XFree(kids)
             if w == self.root or title not in self._title(w).lower():
                 continue
+            rank = game_window_rank(title, self._title(w), self._class(w))
+            if not rank:
+                continue
             a = self._attrs(w)
-            if a and a.map_state == 2 and a.width * a.height > best_area and a.width >= 300 and a.height >= 200:
-                best, best_area = w, a.width * a.height
+            if a and a.map_state == 2 and a.width >= 300 and a.height >= 200 \
+                    and (rank, a.width * a.height) > best_key:
+                best, best_key = w, (rank, a.width * a.height)
         return best
 
     def grab(self, title: str = "maplestory"):
@@ -822,6 +865,13 @@ class _WinWindowGrab:
         u.GetClientRect.argtypes = [c.c_void_p, c.POINTER(wt.RECT)]
         u.GetWindowTextLengthW.argtypes = [c.c_void_p]
         u.GetWindowTextW.argtypes = [c.c_void_p, c.c_wchar_p, c.c_int]
+        u.GetClassNameW.argtypes = [c.c_void_p, c.c_wchar_p, c.c_int]
+        u.GetWindowThreadProcessId.argtypes = [c.c_void_p, c.POINTER(c.c_ulong)]
+        k = c.windll.kernel32
+        k.OpenProcess.restype = c.c_void_p
+        k.OpenProcess.argtypes = [c.c_ulong, c.c_bool, c.c_ulong]
+        k.QueryFullProcessImageNameW.argtypes = [c.c_void_p, c.c_ulong, c.c_wchar_p, c.POINTER(c.c_ulong)]
+        k.CloseHandle.argtypes = [c.c_void_p]
         g.CreateCompatibleDC.restype = c.c_void_p
         g.CreateCompatibleDC.argtypes = [c.c_void_p]
         g.CreateDIBSection.restype = c.c_void_p
@@ -846,13 +896,39 @@ class _WinWindowGrab:
                     buf = c.create_unicode_buffer(n + 1)
                     u.GetWindowTextW(hwnd, buf, n + 1)
                     if title in buf.value.lower():
+                        cls = c.create_unicode_buffer(256)
+                        u.GetClassNameW(hwnd, cls, 256)       # Chrome_WidgetWin_1, MozillaWindowClass...
+                        owner = cls.value + " " + self._exe(hwnd)
+                        if "chrome_widgetwin" in owner.lower() or "mozillawindowclass" in owner.lower():
+                            owner += " chrome"                # (a Chromium or Firefox window)
+                        rank = game_window_rank(title, buf.value, owner)
                         r = self.wt.RECT()
                         u.GetClientRect(hwnd, c.byref(r))
-                        if r.right >= 300 and r.bottom >= 200:
-                            found.append((r.right * r.bottom, hwnd))
+                        if rank and r.right >= 300 and r.bottom >= 200:
+                            found.append((rank, r.right * r.bottom, hwnd))
             return True
         u.EnumWindows(each, 0)
-        return max(found)[1] if found else None
+        return max(found)[2] if found else None
+
+    def _exe(self, hwnd) -> str:
+        """The program a window belongs to ("MapleStory.exe", "firefox.exe"), or ""."""
+        c, u = self.c, self.u
+        try:
+            pid = c.c_ulong()
+            u.GetWindowThreadProcessId(hwnd, c.byref(pid))
+            k = c.windll.kernel32
+            h = k.OpenProcess(0x1000, False, pid.value)        # PROCESS_QUERY_LIMITED_INFORMATION
+            if not h:
+                return ""
+            try:
+                buf, n = c.create_unicode_buffer(520), c.c_ulong(520)
+                if k.QueryFullProcessImageNameW(h, 0, buf, c.byref(n)):
+                    return buf.value.replace("\\", "/").rsplit("/", 1)[-1]
+            finally:
+                k.CloseHandle(h)
+        except Exception:
+            pass
+        return ""
 
     def grab(self, title: str):
         with self.lock:
@@ -1002,21 +1078,25 @@ class _MacWindowGrab:
         arr = cg.CGWindowListCopyWindowInfo(16, 0)          # every window but the desktop's
         if not arr:
             return None
-        best = (0, None)
+        best = ((0, 0), None)
         try:
             for i in range(cf.CFArrayGetCount(arr)):
                 d = cf.CFArrayGetValueAtIndex(arr, i)
                 if self._num(d, "kCGWindowLayer") != 0:
                     continue
-                name = (self._str(d, "kCGWindowName") + " " + self._str(d, "kCGWindowOwnerName")).lower()
-                if title not in name:
+                wname, owner = self._str(d, "kCGWindowName"), self._str(d, "kCGWindowOwnerName")
+                if title not in (wname + " " + owner).lower():
+                    continue
+                # the game's window can have no name of its own (the app's name is its owner)
+                rank = game_window_rank(title, wname if title in wname.lower() else owner, owner)
+                if not rank:
                     continue
                 r = self.CGRect()
                 b = cf.CFDictionaryGetValue(d, self.keys["kCGWindowBounds"])
                 if b and cg.CGRectMakeWithDictionaryRepresentation(b, c.byref(r)):
-                    area = r.size.width * r.size.height
-                    if r.size.width >= 300 and r.size.height >= 200 and area > best[0]:
-                        best = (area, self._num(d, "kCGWindowNumber"))
+                    key = (rank, r.size.width * r.size.height)
+                    if r.size.width >= 300 and r.size.height >= 200 and key > best[0]:
+                        best = (key, self._num(d, "kCGWindowNumber"))
         finally:
             cf.CFRelease(arr)
         return best[1]

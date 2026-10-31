@@ -1,6 +1,6 @@
 """Checks the game-window capture (mfm.game_window_grab) on this machine: opens a
 window titled "MapleStory" with known colours, covers part of it with another window,
-and reads it. Prints the result; exit code 0 = read right, 1 = wrong, 2 = not read."""
+opens a bigger browser-like window with "MapleStory" in its title, and reads the game's. Prints the result; exit code 0 = read right, 1 = wrong, 2 = not read."""
 import os
 import sys
 import threading
@@ -20,6 +20,12 @@ cover = tk.Toplevel(root)
 cover.title("cover")
 cover.geometry("300x300+120+120")
 tk.Frame(cover, bg="#00ff00", width=300, height=300).pack()
+# a bigger window with "MapleStory" in its title too (a browser on a MapleStory page):
+# never the one read
+decoy = tk.Toplevel(root)
+decoy.title("MapleStory Classic - YouTube — Mozilla Firefox")
+decoy.geometry("900x700+760+60")
+tk.Frame(decoy, bg="#c00000", width=900, height=700).pack()
 result = {}
 
 

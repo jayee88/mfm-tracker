@@ -23,6 +23,12 @@
   already read ahead are still used; a very fast scroll may skip a row. Off: every frame
   is read, however far behind.
 
+- **A browser window with "MapleStory" in its title was read instead of the game.**
+  The game's window is now the one titled exactly as set in Settings → Reading → Window
+  title ("MapleStory") first; a longer title only counts when there's none, and windows
+  of browsers (Firefox, Chrome, Edge, Brave, Opera, Safari...), Discord, OBS, Steam and
+  this app never count, whatever their title says. On Windows, macOS and Linux.
+
 ### Changed
 - **The market price follows the market.** It was the median of the sold prices alone
   once an item had sold twice (sold prices pile up slowly, so it hardly moved as asks
