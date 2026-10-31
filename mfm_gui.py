@@ -1065,7 +1065,7 @@ class Overlay(tk.Toplevel):
         elif not running:
             key = hotkey_cfg(a.cfg)["monitor"] if a.cfg.get("hotkeys_on", False) and a._hotkeys else ""
             status, warn = (f"Press {key} to start monitoring." if key
-                            else "Press Start monitoring in the app."), False
+                            else "Click Track shops in the app."), False
         elif a.backlog >= 10:
             status, warn = f"Reading is {a.backlog} frames behind. Nothing is lost.", True
         elif not ch:
@@ -1215,13 +1215,20 @@ class App:
         tip("Green: connected to the Shared Database and syncing. Red: not connected.", self.shared_dot)
         # left of the button: a green arrow while monitoring, a red square when stopped
         # (drawn, not a text symbol, so it shows whatever fonts there are)
-        self.run_mark = tk.Canvas(bar, width=18, height=18, highlightthickness=0, bd=0,
-                                  background=ttk.Style().lookup("TFrame", "background") or None)
-        self.run_mark.pack(side="left", padx=(0, 5))
-        self._run_mark(False)
-        tip("Green arrow: monitoring. Red square: stopped.", self.run_mark)
-        self.start_btn = ttk.Button(bar, text="Start monitoring", command=self.toggle, width=16)
-        self.start_btn.pack(side="left")
+        # shops and megaphones are tracked on their own: a button each, with its mark
+        self.tracking = {"shops": False, "megaphones": False}
+        self.track_btns, self.track_marks = {}, {}
+        for kind, tiptext in (
+                ("shops", "Reads the shops you open (Live, Deals, prices). Green arrow: on. Red square: off."),
+                ("megaphones", "Reads megaphones from the chat window. Green arrow: on. Red square: off.")):
+            mark = tk.Canvas(bar, width=18, height=18, highlightthickness=0, bd=0,
+                             background=ttk.Style().lookup("TFrame", "background") or None)
+            mark.pack(side="left", padx=(0 if kind == "shops" else 12, 5))
+            b = ttk.Button(bar, width=17, command=lambda k=kind: self.toggle_kind(k))
+            b.pack(side="left")
+            tip(tiptext, mark, b)
+            self.track_marks[kind], self.track_btns[kind] = mark, b
+        self._update_track_ui()
         ttk.Label(bar, text="Channel:").pack(side="left", padx=(14, 4))
         # stays filled in for every shop until you change it (saved with each listing)
         self.channel_var = tk.StringVar()
@@ -1343,6 +1350,17 @@ class App:
         ttk.Label(legend, foreground="#666",
                   text=" = name not in the item list. Fix it in the Review tab."
                   ).pack(side="left")
+        # the market window: market price, medians and counts from prices seen in it
+        ttk.Label(legend, text="Market from the last").pack(side="left", padx=(24, 4))
+        self.market_hours_var = tk.StringVar(value=f"{mfm.market_hours(self.cfg):g}")
+        sp = ttk.Spinbox(legend, from_=1, to=2160, increment=24, width=6, textvariable=self.market_hours_var,
+                         command=self._market_hours_changed)
+        sp.pack(side="left")
+        ttk.Label(legend, text="hours (168 = 1 week)").pack(side="left", padx=(4, 0))
+        sp.bind("<Return>", lambda e: self._market_hours_changed())
+        sp.bind("<FocusOut>", lambda e: self._market_hours_changed())
+        tip("The market price, the listed and sold medians and their counts use only prices seen "
+            "in this many hours (everywhere: Live, Deals, Items, My Inventory). Also in Settings.", sp)
         self._build_item_filter(items)
         self.items = make_tree(items, ("item", "best", "best_shop", "best_player", "best_map", "best_channel",
                                        "listed_med", "listed_n",
@@ -1384,12 +1402,44 @@ class App:
 
     # ------------------------------------------------------------------ monitoring
     def toggle(self):
+        """Start or stop tracking both (the widget's button, the hotkey)."""
         if self.worker and self.worker.is_alive():
-            self.stop()
+            self.stop()          # (pressed again while finishing: drops the frames left)
         else:
             self.start()
 
-    def start(self):
+    def toggle_kind(self, kind):
+        """The Shops or Megaphones button: that one on or off; the monitor runs while
+        either is on."""
+        if self.worker and self.worker.is_alive() and self.stop_event.is_set():
+            self.stop()          # still finishing the frames left: pressed again drops them
+            return
+        if not (self.worker and self.worker.is_alive()):
+            self.start(kinds=(kind,))
+            return
+        self.tracking[kind] = not self.tracking[kind]
+        if not any(self.tracking.values()):
+            self.stop()
+            return
+        self.monitor.read_shops = self.tracking["shops"]
+        self.monitor.read_megaphones = self.tracking["megaphones"]
+        self._update_track_ui()
+        self._set_status(f"{kind.capitalize()}: {'tracking' if self.tracking[kind] else 'stopped'}.")
+        self._mega_status_text(None)
+
+    def _update_track_ui(self):
+        names = {"shops": "shops", "megaphones": "megaphones"}
+        for kind, b in self.track_btns.items():
+            on = self.tracking[kind]
+            b.config(text=f"{'Stop' if on else 'Track'} {names[kind]}")
+            c = self.track_marks[kind]
+            c.delete("all")
+            if on:
+                c.create_polygon(4, 2, 16, 9, 4, 16, fill="#2e7d32", outline="#1b5e20")
+            else:
+                c.create_rectangle(3, 3, 15, 15, fill="#c62828", outline="#8e0000")
+
+    def start(self, kinds=("shops", "megaphones")):
         if not mfm.mac_screen_access(ask=True):
             messagebox.showwarning(
                 "Screen Recording permission needed",
@@ -1402,22 +1452,16 @@ class App:
                                    self.channel())
         self.monitor.chan_watch = self.chan_watch
         self.monitor.own_windows = lambda: self._own_rects
+        self.tracking = {k: k in kinds for k in self.tracking}
+        self.monitor.read_shops = self.tracking["shops"]
+        self.monitor.read_megaphones = self.tracking["megaphones"]
         self.worker = threading.Thread(target=self.monitor.run, args=(self.stop_event,), daemon=True)
         self.worker.start()
         self.run_started = time.time()
-        self.start_btn.config(text="Stop monitoring")
-        self._run_mark(True)
-        self._set_status("Monitoring — open shops and scroll through them normally.")
+        self._update_track_ui()
+        self._set_status("Monitoring — open shops and scroll through them normally." if self.tracking["shops"]
+                         else "Reading megaphones.")
         self._mega_status_text(None)
-
-    def _run_mark(self, running: bool) -> None:
-        """The mark next to Start/Stop monitoring: green arrow, or red square."""
-        c = self.run_mark
-        c.delete("all")
-        if running:
-            c.create_polygon(4, 2, 16, 9, 4, 16, fill="#2e7d32", outline="#1b5e20")
-        else:
-            c.create_rectangle(3, 3, 15, 15, fill="#c62828", outline="#8e0000")
 
     def stop(self):
         aborting = False
@@ -1428,8 +1472,8 @@ class App:
                 self.monitor.abort = True   # pressed again while finishing: drop the queue
                 aborting = True
             self.stop_event.set()
-        self.start_btn.config(text="Start monitoring")
-        self._run_mark(False)
+        self.tracking = {k: False for k in self.tracking}
+        self._update_track_ui()
         if not aborting and self.worker and self.worker.is_alive() and self.backlog:
             self._set_status(f"Stopped — still reading {self.backlog} captured frames "
                              "(press Stop again to discard them).")
@@ -2111,7 +2155,7 @@ class App:
             f"Current map:  {self.last_map or '—'}"))
 
     def _set_status(self, text=None):
-        base = text or "Idle. Press Start, then play normally."
+        base = text or "Idle. Click Track shops (and Track megaphones), then play normally."
         self.status.config(text=f"{base}    ·    v{mfm.VERSION}    ·    data: {mfm.DATA}")
 
     # ------------------------------------------------------------------ tables
@@ -2383,6 +2427,17 @@ class App:
             else:
                 restore()
         put(0)
+
+    def _market_hours_changed(self):
+        try:
+            h = max(1, min(2160, int(float(self.market_hours_var.get()))))
+        except (ValueError, tk.TclError):
+            return
+        if h != mfm.market_hours(self.cfg):
+            self.cfg["market_hours"] = h
+            mfm.save_config(self.cfg)
+            self._set_status(f"Market prices now from the last {h:,} hours.")
+            self.refresh_tables()
 
     def _fill_items(self, rows):
         restore = self._keep_selection(self.items, lambda t, k: t.set(k, "item"))
@@ -2912,10 +2967,10 @@ class App:
         self.refresh_megaphones()
 
     def _mega_status_text(self, found):
-        running = bool(self.worker and self.worker.is_alive())
+        running = bool(self.worker and self.worker.is_alive()) and self.tracking.get("megaphones")
         manual = mfm.drawn_area(self.cfg, "chat_region")
         self.mega_status.config(text=(
-            "Start monitoring to read megaphones." if not running else
+            "Click Track megaphones to read megaphones." if not running else
             "Reading the chat area you drew." if manual and found else
             "Reading the chat window." if found else
             ("Chat window not found in " + ("the game's window" if mfm.GRAB_MODE[0] == "window" else "the screen")
@@ -6343,7 +6398,7 @@ class App:
             ("confirm_frames", "Frames to confirm a row", 1, 5, 1),
             ("unmatched_extra_frames", "Extra reads for names not in database", 0, 5, 1),
             ("close_frames", "Empty frames = shop closed", 1, 20, 1),
-            ("history_days", "Market median window (days)", 1, 90, 1),
+            ("market_hours", "Market price window (hours)", 1, 2160, 1),
             ("upscale", "OCR upscale factor", 1, 6, 1),
             ("min_sightings", "Required sightings (1 per player a day)", 1, 100, 1),
             ("deal_threshold_pct", "Flag DEAL / HIGH at ± %", 1, 90, 1),
@@ -6363,7 +6418,8 @@ class App:
             "unmatched_extra_frames": "Extra reads for names not in the item list, before they're "
                                       "saved.",
             "close_frames": "Reads without a shop before the shop counts as closed.",
-            "history_days": "How many days of sightings make the market price.",
+            "market_hours": "How many hours of prices make the market price (168 = 1 week). Also the "
+                            "box above the Items table.",
             "shot_days": "The shop window as it was on screen when a row was logged is kept this "
                          "long (right-click a listing → Show shop photo), to check a misread name. "
                          "About 20 KB each, a few per shop visit. 0 takes none.",
@@ -6496,6 +6552,13 @@ class App:
         self._window_detection_frame(rd).pack(fill="x")
         ocr_box, ocr_vars = self._ocr_training_frame(rd)
         ocr_box.pack(fill="x", pady=(10, 0))
+        stay_live = tk.BooleanVar(value=self.cfg.get("stay_live", True))
+        cbl = ttk.Checkbutton(rd, text="Stay live: when reading falls behind, skip to the newest frames",
+                              variable=stay_live)
+        cbl.pack(anchor="w", pady=(10, 0))
+        tip("What the app shows stays about a second behind the screen at most, so Live is what's on "
+            "screen now. A very fast scroll may then skip a row. Off: every captured frame is read, "
+            "however far behind that gets.", cbl)
         cb = ttk.Checkbutton(rd, text="Save every capture as PNG (for debugging OCR)", variable=save_caps)
         cb.pack(anchor="w", pady=(10, 0))
         tip("Saves a picture of every screen read, for troubleshooting. Leave off normally.", cb)
@@ -6560,18 +6623,21 @@ class App:
                 messagebox.showerror("Invalid value", "Please enter numbers only.", parent=win)
                 return
             c = ret_cfg()
-            if c["retention"] != "keep" and c["keep_days"] < int(self.cfg.get("history_days", 14)):
+            if c["retention"] != "keep" and c["keep_days"] * 24 < mfm.market_hours(self.cfg):
                 if not messagebox.askyesno(
                         "Data retention", f"Keeping listings for {c['keep_days']} days is shorter than "
-                        f"the market price window ({self.cfg.get('history_days', 14)} days).\n\n"
+                        f"the market price window ({mfm.market_hours(self.cfg):,.0f} hours).\n\n"
                         "Save anyway?", parent=win):
                     return
             self.cfg.update(c)
             for get in kinds.values():
                 self.cfg.update(get())
+            if hasattr(self, "market_hours_var"):
+                self.market_hours_var.set(f"{mfm.market_hours(self.cfg):g}")
             if hasattr(self, "mega_hours"):
                 self.mega_hours.set(int(self.cfg.get("megaphone_hours", 72)))
             self.cfg["save_captures"] = save_caps.get()
+            self.cfg["stay_live"] = stay_live.get()
             self.cfg["ocr_collect"], self.cfg["ocr_share"] = ocr_vars[0].get(), ocr_vars[1].get()
             self.cfg["ocr_collect_stores"], self.cfg["ocr_collect_players"] = ocr_vars[2].get(), ocr_vars[3].get()
             mfm.OCR_COLLECT.set_from(self.cfg)

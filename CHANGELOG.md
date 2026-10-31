@@ -12,6 +12,24 @@
   that price. Include sold shows it again; nothing is deleted. (Thanks,
   GabrielGarciaRivas.)
 
+- **Track shops** and **Track megaphones**: two buttons instead of Start monitoring,
+  each turned on and off on its own, each with its own green arrow / red square.
+- **Market window in hours:** a box above the Items table (and Settings → Market price
+  window) sets how many hours of prices make the market price; **168 hours (1 week)** by
+  default. The medians and counts in Items and My Inventory use the same window.
+- **Stay live** (Settings → Reading, on): when the reading falls behind the screen, frames
+  more than a second old are skipped (when a newer one is waiting), so Live shows what's
+  on screen now instead of a shop you left minutes ago. Unchanged frames and frames
+  already read ahead are still used; a very fast scroll may skip a row. Off: every frame
+  is read, however far behind.
+
+### Changed
+- **The market price follows the market.** It was the median of the sold prices alone
+  once an item had sold twice (sold prices pile up slowly, so it hardly moved as asks
+  changed), and an imported reference price always won over your own data. It's now the
+  median of every price seen in the market window, listed and sold, and a reference price
+  is only used until there are enough sightings.
+
 ### Fixed
 - **The window froze for 15–20 seconds after launch and stalled every few seconds on a
   big database.** My Inventory's numbers are worked out in the background with the

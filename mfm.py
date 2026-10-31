@@ -157,7 +157,7 @@ DEFAULT_CONFIG = {
     "close_frames": 3,         # empty frames in a row = shop closed
     "hotkey": "f8",
     "deal_threshold_pct": 15,  # flag listings this % below/above market
-    "history_days": 14,        # window for computing market rate from your logs
+    "market_hours": 168,       # market price from the prices seen in the last N hours (1 week)
     "outliers_on": True,       # ignore absurd prices once an item has enough sightings
     "min_sightings": 5,        # sightings (from different players) an item needs before it's judged (market price,
                                # DEAL / HIGH, outliers)
@@ -174,6 +174,7 @@ DEFAULT_CONFIG = {
     "aliases_keep_days": 365,
     "ocr_retention": "keep",            # OCR training pictures older than ocr_keep_days: archive, delete or keep
     "ocr_keep_days": 60,
+    "stay_live": True,         # when the reading falls behind, skip to the newest frames
     "review_on": True,         # the Review tab (names to match to items); off hides it
     "channel_count": 40,       # channels shown in the channel picker (1-100)
     "hotkeys_on": False,       # the keys below work while the game has focus (off until turned on)
@@ -4084,8 +4085,9 @@ def inventory_stats(con, item: str, cfg: dict) -> dict:
     bounds = outlier_bounds(con, item, cfg)
     prices = [p for (p,) in con.execute(
         "SELECT price FROM listings WHERE item = ? AND COALESCE(last_seen, ts) >= ?",
-        (item, utc_ago(days=cfg["history_days"]))) if not is_outlier(p, bounds)]
-    points = con.execute("SELECT COUNT(*) FROM listings WHERE item = ?", (item,)).fetchone()[0]
+        (item, market_since(cfg))) if not is_outlier(p, bounds)]
+    points = con.execute("SELECT COUNT(*) FROM listings WHERE item = ? AND COALESCE(last_seen, ts) >= ?",
+                         (item, market_since(cfg))).fetchone()[0]
     sold24 = con.execute("SELECT COUNT(*) FROM listings WHERE item = ? AND COALESCE(sold, 0) = 1 "
                          "AND COALESCE(sold_ts, last_seen, ts) >= ?", (item, utc_ago(hours=24))).fetchone()[0]
     last3 = [p for (p,) in con.execute(
@@ -6560,7 +6562,7 @@ def outlier_bounds(con, item: str, cfg: dict) -> tuple[float, float] | None:
     filtering is off or there isn't enough data yet."""
     if not cfg.get("outliers_on", True):
         return None
-    since = utc_ago(days=cfg["history_days"])
+    since = market_since(cfg)
     rows = con.execute(
         f"SELECT {_PLAYER_KEY}, ts, price FROM listings WHERE item = ? AND COALESCE(last_seen, ts) >= ?",
         (item, since)).fetchall()
@@ -6582,7 +6584,7 @@ def price_stats(con, item: str, cfg: dict, bounds="auto") -> dict:
     one price (their median, see _postings); the _n counts are listings."""
     if bounds == "auto":
         bounds = outlier_bounds(con, item, cfg)
-    since = utc_ago(days=cfg["history_days"])
+    since = market_since(cfg)
     listed, sold, out = [], [], 0
     for key, ts, price, is_sold in con.execute(
             f"SELECT {_PLAYER_KEY}, ts, price, COALESCE(sold, 0) FROM listings "
@@ -6613,6 +6615,21 @@ def sighting_count(con, item: str, since: str) -> int:
         (item, since)).fetchall()))
 
 
+def market_hours(cfg: dict) -> float:
+    """The market price window, in hours (Settings and the Items tab's box)."""
+    try:
+        h = float(cfg.get("market_hours") or 0)
+    except (TypeError, ValueError):
+        h = 0
+    if h <= 0:          # settings from before 2610.31 kept days
+        h = float(cfg.get("history_days") or 7) * 24
+    return max(1.0, h)
+
+
+def market_since(cfg: dict) -> str:
+    return utc_ago(hours=market_hours(cfg))
+
+
 def min_sightings(cfg: dict) -> int:
     """Sightings an item needs (in the history window, from different players: see
     sighting_count) before it's judged: before your own sightings give it a market
@@ -6625,25 +6642,23 @@ def min_sightings(cfg: dict) -> int:
 
 
 def market_rate(con, item: str, cfg: dict) -> tuple[int | None, str]:
-    """What an item is worth, in order of preference:
-    1. a reference price you imported (e.g. from meso.watch)
-    2. the median price it has actually SOLD for (2+ sales seen)
-    3. the median of everything seen, listed and sold
-    2 and 3 only once the item has `min_sightings` sightings in the history window,
-    so a listing isn't called a DEAL or HIGH against one or two prices."""
-    ref = con.execute("SELECT price, source FROM reference WHERE item = ?", (item,)).fetchone()
-    if ref:
-        return ref[0], ref[1] or "reference"
+    """What an item is worth: the median of every price seen in the market window
+    (Settings → Market price window, 1 week by default), listed and sold, once the item
+    has `min_sightings` sightings there (so a listing isn't called a DEAL or HIGH
+    against one or two prices). Before that, a reference price you imported, if any.
+    (Before 2610.31 an imported price always won, and 2 sales were enough for the
+    sold prices alone to set it: the market price then hardly moved with the asks.)"""
     need = min_sightings(cfg)
-    seen = sighting_count(con, item, utc_ago(days=cfg["history_days"]))
+    seen = sighting_count(con, item, market_since(cfg))
     if seen < need:
+        ref = con.execute("SELECT price, source FROM reference WHERE item = ?", (item,)).fetchone()
+        if ref:
+            return ref[0], ref[1] or "reference"
         return None, f"not enough data ({seen} of {need} sightings)"
     bounds = outlier_bounds(con, item, cfg)
     st = price_stats(con, item, cfg, bounds)
     skipped = f", {st['outliers']} outlier{'s' if st['outliers'] != 1 else ''} ignored" if st["outliers"] else ""
-    if st["sold_players"] >= 2:
-        return st["sold_median"], f"median of {st['sold_n']} sold (counted as {st['sold_players']}){skipped}"
-    since = utc_ago(days=cfg["history_days"])
+    since = market_since(cfg)
     rows = [(k, t, p) for k, t, p in con.execute(
         f"SELECT {_PLAYER_KEY}, ts, price FROM listings WHERE item = ? AND COALESCE(last_seen, ts) >= ?",
         (item, since)) if not is_outlier(p, bounds)]
@@ -8655,6 +8670,11 @@ class Monitor:
         self.empty_first: float | None = None   # capture time of the first empty frame
         self._now = 0.0                          # capture time of the frame in step()
         self.abort = False   # set while stopping to throw away the queued frames
+        # what's tracked, each turned on and off on its own (the app's Shops and
+        # Megaphones buttons); the capture thread reads these as it goes
+        self.read_shops = True
+        self.read_megaphones = True
+        self.skipped = 0     # frames left unread to stay live (see stay_live)
         self.last_hash = None
         self.last_keys: list[tuple] = []
         self.last_listings: list[Listing] = []
@@ -9068,8 +9088,8 @@ class Monitor:
             con = None
             while not stop_event.wait(MAP_EVERY):
                 full = latest["full"]
-                if full is None:
-                    continue
+                if full is None or not self.read_shops:
+                    continue          # (the map is only saved with shop listings)
                 try:
                     area = drawn_area(self.cfg, "map_region", full.size)
                     if is_auto(area, full.size):
@@ -9122,9 +9142,10 @@ class Monitor:
                                 self.on_event("channel_cancel", None)
                         except Exception as e:
                             self.on_event("error", f"channel check failed: {type(e).__name__}: {e}")
-                    if self.megaphones.due():
+                    if self.read_megaphones and self.megaphones.due():
                         self.megaphones.offer(full)
-                    shop_r, map_r = self.regions_for(full)
+                    # shops not tracked: an empty frame, so a visit still open ends
+                    shop_r, map_r = self.regions_for(full) if self.read_shops else (None, None)
                     if shop_r is None:
                         imgs = (blank, None)   # no store window anywhere: counts as closed
                     else:
@@ -9193,6 +9214,18 @@ class Monitor:
                     except Exception as e:
                         self.on_event("error", f"read-ahead: {type(e).__name__}: {e}")
                 img, map_img, ts, chan = pending.popleft()
+                pf = self._prefetched.get(id(img))
+                cheap = (pf is not None and (pf[1] is None or pf[1].done())   # unchanged, or read ahead
+                         or (self.last_hash is not None and bin(frame_hash(img) ^ self.last_hash).count("1") <= 8))
+                if self.cfg.get("stay_live", True) and not stop_event.is_set() and not cheap \
+                        and time.monotonic() - ts > LIVE_LAG and (pending or frames.qsize()):
+                    # Stay live: the reading is behind the screen and a newer frame is
+                    # waiting, so this one (which would need a full read) is left unread.
+                    # What the app shows is then about a second behind at most (a fast
+                    # scroll may skip a row). Frames already read ahead are still used.
+                    self._prefetched.pop(id(img), None)
+                    self.skipped += 1
+                    continue
                 try:
                     self.step(img, map_img, ts, chan)
                 except Exception as e:  # keep monitoring through transient failures
@@ -9210,6 +9243,9 @@ class Monitor:
                 self.shots_con.close()
                 self.shots_con = None
             self.on_event("stopped", {})
+
+
+LIVE_LAG = 1.0       # stay_live: frames older than this (seconds) are skipped when newer ones wait
 
 
 def watch(channel, cfg) -> None:

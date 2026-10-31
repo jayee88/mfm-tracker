@@ -102,9 +102,11 @@ The finished app is in the `dist` folder.
 1. Open Free Market Tracker. The first time, it offers to download the MapleStory Classic
    item and map lists. Say yes; they correct misread item and map names.
 2. Pick your **Channel**.
-3. Click **Start monitoring**, then play normally: open shops and scroll through them.
-   Left of the button, a green arrow means it's monitoring and a red square means it's
-   stopped. Next to the channel, **Map:** shows the map you're on, read from the
+3. Click **Track shops** (and **Track megaphones**, to read the chat's megaphones too),
+   then play normally: open shops and scroll through them. Each is turned on and off on
+   its own; left of each button, a green arrow means it's on and a red square means it's
+   off. If the reading falls behind the screen, it skips to the newest frames so what you
+   see stays live (Settings → Reading → **Stay live**). Next to the channel, **Map:** shows the map you're on, read from the
    minimap every few seconds while monitoring.
 
 The shop window and the minimap are found automatically, on any monitor. Each listing is
@@ -335,13 +337,14 @@ Inventory** deletes it all (it asks first and keeps a backup).
 
 ## Market price
 
-An item's market price is:
-1. a reference price you imported, or
-2. the median of the prices you've seen over the last 14 days (only sold prices, once it
-   has sold at least twice).
+An item's market price is the median of every price you've seen for it (listed and sold)
+in the **market window**: the last **168 hours** (1 week) by default. Change it with the box
+above the Items table, or in Settings. The medians and counts in Items and My Inventory use
+the same window, so the market price follows the market as prices change.
 
-Your own sightings only count once an item has been seen **5 times** (Settings →
-**Required sightings (1 per player a day)**). A player's listings of an item posted within
+Your own sightings only count once an item has been seen **5 times** in that window (Settings →
+**Required sightings (1 per player a day)**). Until then, a reference price you imported is
+used, if there is one. A player's listings of an item posted within
 24 hours of each other count once, and as one price (the median of theirs) in the market
 price, so someone listing 100 of an item at once can't set its price. The same player's
 listings days apart count separately. Until then it shows no DEAL or HIGH.
@@ -409,7 +412,7 @@ item and map lists) and **Data** (how long each kind of data is kept). Rest the 
 | Frames to confirm a row | 2 | identical reads needed before a listing is saved |
 | Extra reads for names not in database | 2 | extra reads before an unknown name is saved |
 | Empty frames = shop closed | 3 | reads without a shop before it counts as closed |
-| Market median window (days) | 14 | how many days of sightings make the market price |
+| Market price window (hours) | 168 | how many hours of prices make the market price (also the box above Items) |
 | OCR upscale factor | 3 | raise it if small text is misread |
 | Required sightings (1 per player a day) | 5 | sightings needed before an item gets a market price, DEAL / HIGH, and outliers; a player's listings within 24 hours count once |
 | Flag DEAL / HIGH at ± % | 15 | how far from the market price a listing must be |
